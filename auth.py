@@ -187,22 +187,39 @@ class Authenticator:
             now = time.time()
             elapsed = int(now - start_time)
 
-            # 检查当前是否处于 "Verifying..." 旋转计算中
+            # 检查当前是否处于 "Verifying..." 旋转计算中 (穿透 Frame 探测)
             is_verifying = False
             try:
-                for v_text in ["Verifying...", "正在验证"]:
-                    if await page.locator(f'text="{v_text}"').first.is_visible(timeout=200):
-                        is_verifying = True
+                for f in page.frames:
+                    if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                        for v_text in ["Verifying", "正在验证", "Verification", "Waiting"]:
+                            try:
+                                if await f.locator(f'text="{v_text}"').first.is_visible(timeout=150):
+                                    is_verifying = True
+                                    break
+                            except Exception:
+                                pass
+                    if is_verifying:
                         break
             except Exception:
                 pass
 
+            # 兼容外层页面文本
+            if not is_verifying:
+                try:
+                    for v_text in ["Verifying...", "正在验证"]:
+                        if await page.locator(f'text="{v_text}"').first.is_visible(timeout=150):
+                            is_verifying = True
+                            break
+                except Exception:
+                    pass
+
             if is_verifying:
-                # 正在旋转认证，绝对不可点击打断！
-                if now - last_log_time >= 8:
-                    logger.info(f"[{self.account.email}] Cloudflare 正在验证中 (Verifying... 圆圈旋转中，已耗时 {elapsed} 秒)，静默等待放行...")
+                # 正在旋转认证，绝对不可重复点击打断，耐心静默等待
+                if now - last_log_time >= 6:
+                    logger.info(f"[{self.account.email}] Cloudflare 正在验证中 (Verifying... 绿圈旋转中，已耗时 {elapsed} 秒)，静默等待认证通过...")
                     last_log_time = now
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(2)
                 continue
 
             # 尚未进入 Verifying 且未点击过 (或距离上次点击已超过 45 秒未响应)，触发一次点击
