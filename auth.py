@@ -300,47 +300,52 @@ class Authenticator:
         try:
             # 允许最多 2 次全流程重试以应对偶发代理网络超时
             for attempt in range(1, 3):
-                logger.info(f"正在加载 ChatGPT 登录页 (代理连接中，第 {attempt} 次尝试)...")
+                logger.info(f"正在加载 ChatGPT 登录入口 (代理连接中，第 {attempt} 次尝试)...")
                 try:
-                    await page.goto("https://chatgpt.com/auth/login", wait_until="commit", timeout=90000)
+                    await page.goto("https://chatgpt.com", wait_until="commit", timeout=90000)
                     await asyncio.sleep(2)
                 except Exception as e:
-                    logger.warning(f"打开登录页延迟较高: {e}")
+                    logger.warning(f"打开登录入口延迟较高: {e}")
 
                 # 动态等待：一边穿透 Cloudflare，一边等待登录表单或邮箱输入框就绪 (最多等待 120 秒)
                 start_load = time.time()
                 email_ready = False
-                email_input = page.locator('input[name="username"], input[type="email"], input[id="email-input"]').first
+                email_input = page.locator('input[type="email"], input[name="email"], input#email-input, input[name="username"]').first
 
                 while time.time() - start_load < 120:
-                    # 1. 检查邮箱输入框是否已经呈现 (若就绪则直接进入下一步)
+                    # 1. 检查是否有 Cookie 接受弹窗 (Accept all / 全部接受)
+                    cookie_btn = page.locator('button:text-is("Accept all"), button:text-is("全部接受")').first
+                    try:
+                        if await cookie_btn.is_visible(timeout=300):
+                            await cookie_btn.click(force=True)
+                            await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+
+                    # 2. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱登录弹窗
+                    login_btn = page.locator('button[data-testid="login-button"], a:has-text("Log in"), button:text-is("Log in"), button:text-is("登录")').first
+                    try:
+                        if await login_btn.is_visible(timeout=600):
+                            logger.info("点击主页【Log in / 登录】按钮唤出登录面板...")
+                            await login_btn.click()
+                            await asyncio.sleep(2)
+                    except Exception:
+                        pass
+
+                    # 3. 检查邮箱输入框是否已经呈现 (若就绪则直接进入下一步)
                     try:
                         if await email_input.is_visible(timeout=800):
-                            logger.info(f"[{self.account.email}] 登录页加载完成，邮箱输入框就绪！")
+                            logger.info(f"[{self.account.email}] 登录面板加载完成，邮箱输入框就绪！")
                             email_ready = True
                             break
                     except Exception:
                         pass
 
-                    # 2. 如果检测到 Cloudflare 质询拦截，交给专职函数处理 (静默等待转圈完成放行)
+                    # 4. 如果检测到 Cloudflare 质询拦截，交给专职函数处理 (静默等待转圈完成放行)
                     is_cf, _ = await self.is_in_cloudflare(page)
                     if is_cf:
                         await self.handle_cloudflare(page, max_wait=120)
                         start_load = time.time()  # 质询处理完毕后重置计时，确保后续加载时间充足
-                        continue
-
-                    # 3. 检查是否有 Cookie 接受弹窗 (Accept all / 全部接受)
-                    cookie_btn = page.locator('button:text-is("Accept all"), button:text-is("全部接受")').first
-                    if await cookie_btn.is_visible(timeout=500):
-                        await cookie_btn.click()
-                        await asyncio.sleep(0.5)
-
-                    # 4. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱输入页
-                    login_btn = page.locator('button[data-testid="login-button"], button:text-is("Log in"), button:text-is("登录")').first
-                    if await login_btn.is_visible(timeout=800):
-                        logger.info("点击初始【Log in / 登录】按钮...")
-                        await login_btn.click()
-                        await asyncio.sleep(2)
                         continue
 
                     # 5. 检查是否有 Try again 按钮
