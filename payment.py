@@ -169,9 +169,12 @@ class PaymentManager:
         logger.info(f"卡号末尾: {card.card_number[-4:] if len(card.card_number) >= 4 else '****'} | 持卡人: {card.card_name}")
 
         proxy_dict = get_playwright_proxy(settings.http_proxy)
-        is_headless = settings.headless
-        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        if os.environ.get("DISPLAY"):
+            is_headless = False
+        elif sys.platform.startswith("linux"):
             is_headless = True
+        else:
+            is_headless = settings.headless
 
         browser = await p.chromium.launch(
             headless=is_headless,

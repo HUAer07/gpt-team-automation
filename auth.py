@@ -34,12 +34,14 @@ class Authenticator:
         if proxy_dict:
             logger.info(f"浏览器挂载代理: {proxy_dict.get('server')}")
         
-        # 判断运行环境：如果在无图形界面的 Linux（如云服务器/Docker容器），自动使用无头模式
-        is_headless = settings.headless
-        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-            if not is_headless:
-                logger.info("检测到云端服务器无图形显示环境，已自动适配为无头静默运行模式")
+        # 渲染模式智能决策：若具备 DISPLAY (Xvfb虚拟显卡)，采用真实有头仿真模式秒过 Cloudflare
+        if os.environ.get("DISPLAY"):
+            is_headless = False
+            logger.info("已挂载虚拟显卡图形渲染环境 (Xvfb/DISPLAY=:99)，采用真实浏览器模式避开 Cloudflare 质询")
+        elif sys.platform.startswith("linux"):
             is_headless = True
+        else:
+            is_headless = settings.headless
 
         browser = await p.chromium.launch(
             headless=is_headless,
