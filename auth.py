@@ -63,6 +63,7 @@ class Authenticator:
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
+            window.navigator.chrome = { runtime: {} };
         """)
         return browser, context
 
@@ -75,6 +76,23 @@ class Authenticator:
             await asyncio.sleep(3)
             return True
         return False
+
+    async def wait_for_cloudflare(self, page: Page, max_wait: int = 15):
+        """检测并等待 Cloudflare Turnstile 质询自动穿透放行"""
+        start = time.time()
+        while time.time() - start < max_wait:
+            title = await page.title()
+            if "just a moment" in title.lower() or "cloudflare" in title.lower():
+                logger.info(f"[{self.account.email}] 检测到 Cloudflare 质询拦截，正在等待自动穿透验证...")
+                try:
+                    cf_box = page.frame_locator('iframe[src*="cloudflare"], iframe[src*="turnstile"]').locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
+                    if await cf_box.is_visible(timeout=800):
+                        await cf_box.click(timeout=800)
+                except Exception:
+                    pass
+                await asyncio.sleep(1.5)
+            else:
+                break
 
     async def login(self, p) -> AuthSession:
         if not self.account.email or not self.account.password:
@@ -94,7 +112,8 @@ class Authenticator:
                 except Exception as e:
                     logger.warning(f"打开登录页延迟较高: {e}")
 
-                # 检查是否触发了 Oops 页面
+                # 检查是否触发了 Cloudflare 质询或 Oops 页面
+                await self.wait_for_cloudflare(page)
                 await self.check_and_recover_error(page)
 
                 # 点击初始登录按钮 (若页面停留在选择登录/注册首页)
@@ -102,6 +121,7 @@ class Authenticator:
                 if await login_btn.is_visible(timeout=3000):
                     await login_btn.click()
                     await asyncio.sleep(2)
+                    await self.wait_for_cloudflare(page)
 
                 # 1. 查找并输入邮箱
                 email_input = page.locator('input[name="username"], input[type="email"], input[id="email-input"]').first
@@ -110,17 +130,21 @@ class Authenticator:
                 await email_input.fill(self.account.email)
                 await asyncio.sleep(0.5)
 
-                # 提交邮箱 (单一提交方式，优先点按钮，避免双重提交导致 Auth0 报错)
+                # 提交邮箱 (按回车并在必要时备用点击继续按钮，确保表单触达服务端)
+                await email_input.press("Enter")
+                await asyncio.sleep(1.5)
+
                 continue_btn = page.locator(
                     'button[name="action"][value="default"], '
                     'form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")), '
                     'button:text-is("Continue"), '
                     'button:text-is("继续")'
                 ).first
-                if await continue_btn.is_visible(timeout=1500):
-                    await continue_btn.click()
-                else:
-                    await email_input.press("Enter")
+                if await continue_btn.is_visible(timeout=1000):
+                    try:
+                        await continue_btn.click(timeout=1000)
+                    except Exception:
+                        pass
                 
                 logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (代理加载中)...")
 
