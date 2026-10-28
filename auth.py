@@ -244,7 +244,7 @@ class Authenticator:
             for attempt in range(1, 3):
                 logger.info(f"正在加载 ChatGPT 登录页 (代理连接中，第 {attempt} 次尝试)...")
                 try:
-                    await page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=90000)
+                    await page.goto("https://chatgpt.com/auth/login", wait_until="commit", timeout=90000)
                     await asyncio.sleep(2)
                 except Exception as e:
                     logger.warning(f"打开登录页延迟较高: {e}")
@@ -255,19 +255,20 @@ class Authenticator:
                 email_input = page.locator('input[name="username"], input[type="email"], input[id="email-input"]').first
 
                 while time.time() - start_load < 120:
-                    # 1. 如果检测到 Cloudflare 质询拦截，交给专职函数处理 (静默等待转圈完成放行)
+                    # 1. 检查邮箱输入框是否已经呈现 (若就绪则直接进入下一步)
+                    try:
+                        if await email_input.is_visible(timeout=800):
+                            logger.info(f"[{self.account.email}] 登录页加载完成，邮箱输入框就绪！")
+                            email_ready = True
+                            break
+                    except Exception:
+                        pass
+
+                    # 2. 如果检测到 Cloudflare 质询拦截，交给专职函数处理 (静默等待转圈完成放行)
                     is_cf, _ = await self.is_in_cloudflare(page)
                     if is_cf:
                         await self.handle_cloudflare(page, max_wait=120)
                         start_load = time.time()  # 质询处理完毕后重置计时，确保后续加载时间充足
-                        continue
-
-                    # 2. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱输入页
-                    login_btn = page.locator('button[data-testid="login-button"], button:text-is("Log in"), button:text-is("登录")').first
-                    if await login_btn.is_visible(timeout=800):
-                        logger.info("点击初始【Log in / 登录】按钮...")
-                        await login_btn.click()
-                        await asyncio.sleep(2)
                         continue
 
                     # 3. 检查是否有 Cookie 接受弹窗 (Accept all / 全部接受)
@@ -276,11 +277,13 @@ class Authenticator:
                         await cookie_btn.click()
                         await asyncio.sleep(0.5)
 
-                    # 4. 检查邮箱输入框是否已经呈现
-                    if await email_input.is_visible(timeout=1000):
-                        logger.info(f"[{self.account.email}] 登录页加载完成，邮箱输入框就绪！")
-                        email_ready = True
-                        break
+                    # 4. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱输入页
+                    login_btn = page.locator('button[data-testid="login-button"], button:text-is("Log in"), button:text-is("登录")').first
+                    if await login_btn.is_visible(timeout=800):
+                        logger.info("点击初始【Log in / 登录】按钮...")
+                        await login_btn.click()
+                        await asyncio.sleep(2)
+                        continue
 
                     # 5. 检查是否有 Try again 按钮
                     await self.check_and_recover_error(page)
@@ -299,33 +302,37 @@ class Authenticator:
                     raise TimeoutError(f"登录页等待超时，当前页面: {await page.title()} ({page.url})")
 
                 logger.info(f"[{self.account.email}] 正在输入邮箱...")
+                await email_input.click()
                 await email_input.fill(self.account.email)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.8)
 
-                # 提交邮箱 (按回车并在必要时备用点击继续按钮，确保表单触达服务端)
-                await email_input.press("Enter")
-                await asyncio.sleep(1.5)
-
+                # 提交邮箱：单次精准点击 Continue 按钮，避免二次点击取消正在进行中的 OAuth 跳转
                 continue_btn = page.locator(
-                    'button[name="action"][value="default"], '
                     'form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")), '
                     'button:text-is("Continue"), '
                     'button:text-is("继续")'
                 ).first
-                if await continue_btn.is_visible(timeout=1000):
-                    try:
-                        await continue_btn.click(timeout=1000)
-                    except Exception:
-                        pass
+                if await continue_btn.is_visible(timeout=1500):
+                    await continue_btn.click()
+                else:
+                    await email_input.press("Enter")
                 
-                logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (兼顾 Cloudflare 与网络延迟)...")
+                logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (耐心等待跳转，避免重复提交)...")
 
-                # 2. 查找并输入密码 (支持兼顾提交邮箱后弹出的 Cloudflare 质询)
+                # 2. 查找并输入密码 (支持兼顾提交邮箱后弹出的 Cloudflare 质询与 OAuth 跳转)
                 password_input = page.locator('input[name="password"], input[type="password"], input#password').first
                 start_pwd_wait = time.time()
                 pwd_ready = False
 
                 while time.time() - start_pwd_wait < 90:
+                    # 优先检测密码输入框是否呈现
+                    try:
+                        if await password_input.is_visible(timeout=1000):
+                            pwd_ready = True
+                            break
+                    except Exception:
+                        pass
+
                     # 检查中途是否弹出 Cloudflare 质询拦截
                     is_cf, _ = await self.is_in_cloudflare(page)
                     if is_cf:
@@ -333,22 +340,10 @@ class Authenticator:
                         start_pwd_wait = time.time()  # 重置密码框等待计时
                         continue
 
-                    # 检查密码框是否呈现
-                    if await password_input.is_visible(timeout=1000):
-                        pwd_ready = True
-                        break
-
                     # 检查是否有 Try again 按钮
                     if await self.check_and_recover_error(page):
                         await asyncio.sleep(2)
                         continue
-
-                    # 备用：如果邮箱提交按钮还在，再次触发提交
-                    if await continue_btn.is_visible(timeout=500):
-                        try:
-                            await continue_btn.click(timeout=500)
-                        except Exception:
-                            pass
 
                     await asyncio.sleep(1.5)
 
