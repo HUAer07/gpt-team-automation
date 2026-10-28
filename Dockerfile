@@ -20,5 +20,6 @@ COPY . .
 
 EXPOSE 8899
 
-# 启动 Web 控制台服务 (通过 xvfb-run 原生虚拟显卡环境启动，全自动绕过 Cloudflare)
-CMD ["xvfb-run", "-a", "python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8899"]
+# 启动入口脚本 (带 Xvfb 虚拟显卡环境)
+RUN chmod +x entrypoint.sh 2>/dev/null || true
+CMD ["./entrypoint.sh"]
