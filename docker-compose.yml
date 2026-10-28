@@ -10,5 +10,5 @@ services:
     environment:
       - TZ=America/New_York
       - PYTHONUNBUFFERED=1
-    command: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24 -ac" python -m uvicorn server:app --host 0.0.0.0 --port 8899
+    command: xvfb-run -a python -m uvicorn server:app --host 0.0.0.0 --port 8899
     shm_size: '2gb'
