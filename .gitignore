@@ -1,0 +1,21 @@
+# 敏感凭据文件 (严禁提交)
+.env
+*.env
+*.pem
+*.key
+
+# 运行与打包缓存
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.log
+
+# 系统与开发工具
+.DS_Store
+.idea/
+.vscode/
+*.zip

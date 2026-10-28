@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ChatGPT Team 自动化协同控制台</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            },
+            dark: {
+              800: '#1e222d',
+              900: '#131722',
+              950: '#0b0e14',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #131722;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #2a2e39;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #3f4452;
+    }
+    .log-font {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+  </style>
+</head>
+<body class="bg-dark-950 text-slate-200 min-h-screen flex flex-col antialiased">
+
+  <!-- 顶部导航栏 -->
+  <header class="bg-dark-900 border-b border-slate-800/80 px-6 py-4 flex items-center justify-between sticky top-0 z-50">
+    <div class="flex items-center space-x-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-emerald-500 flex items-center justify-center shadow-lg shadow-brand-500/20">
+        <i class="fa-solid fa-users-gear text-white text-lg"></i>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+          ChatGPT Team 控制台
+          <span class="text-xs px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-400 border border-brand-500/30">Auto Orchestrator</span>
+        </h1>
+        <p class="text-xs text-slate-400">提取长链 · 自动代付 · 邀请 Owner · 主所有权移交 · 平滑脱离</p>
+      </div>
+    </div>
+
+    <!-- 运行状态指示器 -->
+    <div class="flex items-center space-x-4">
+      <div id="ws-badge" class="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700/50 text-xs">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span id="ws-status-text" class="text-slate-300">通信已连接</span>
+      </div>
+      <div id="pipeline-status-badge" class="px-3 py-1.5 rounded-lg bg-slate-800 text-xs font-medium border border-slate-700 text-slate-300">
+        状态: <span id="pipeline-status-text" class="text-emerald-400">空闲就绪</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主体内容 -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- 左侧：参数配置区域 (5列) -->
+    <div class="lg:col-span-5 space-y-6">
+
+      <!-- 母号配置卡片 -->
+      <div class="bg-dark-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur-sm">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+          <div class="flex items-center space-x-2">
+            <span class="w-7 h-7 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center text-sm font-semibold">母</span>
+            <h2 class="text-sm font-bold text-white">母号配置 (Primary Owner / 提取长链)</h2>
+          </div>
+          <span class="text-xs text-slate-400">负责出长链与转移</span>
+        </div>
+
+        <div class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">母号邮箱</label>
+            <input type="email" id="master_email" placeholder="master@example.com" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">母号密码</label>
+            <div class="relative">
+              <input type="password" id="master_password" placeholder="••••••••" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition pr-10">
+              <button onclick="togglePassword('master_password', this)" class="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300">
+                <i class="fa-regular fa-eye"></i>
+              </button>
+            </div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="text-xs font-medium text-slate-400">2FA Secret 密钥 (Base32)</label>
+              <button onclick="checkTotp('master')" class="text-xs text-brand-400 hover:underline flex items-center gap-1">
+                <i class="fa-solid fa-calculator"></i> 实时验码
+              </button>
+            </div>
+            <input type="text" id="master_totp_secret" placeholder="例如: JBSWY3DPEHPK3PXP" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition uppercase">
+            <div id="master_totp_preview" class="mt-1.5 hidden flex items-center justify-between text-xs bg-slate-800/60 px-3 py-1 rounded-lg text-emerald-400 border border-emerald-500/20">
+              <span>当前 2FA 动态码: <b id="master_totp_code" class="text-sm tracking-wider">------</b></span>
+              <span id="master_totp_timer" class="text-slate-400 text-[11px]">30s</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 子号配置卡片 -->
+      <div class="bg-dark-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur-sm">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+          <div class="flex items-center space-x-2">
+            <span class="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-sm font-semibold">子</span>
+            <h2 class="text-sm font-bold text-white">子号配置 (接管端 / 最终留存)</h2>
+          </div>
+          <span class="text-xs text-slate-400">被拉入并成为唯一 Owner</span>
+        </div>
+
+        <div class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">子号目标邮箱</label>
+            <input type="email" id="child_email" placeholder="child@example.com" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">子号密码</label>
+            <div class="relative">
+              <input type="password" id="child_password" placeholder="••••••••" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition pr-10">
+              <button onclick="togglePassword('child_password', this)" class="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300">
+                <i class="fa-regular fa-eye"></i>
+              </button>
+            </div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="text-xs font-medium text-slate-400">2FA Secret 密钥 (Base32)</label>
+              <button onclick="checkTotp('child')" class="text-xs text-brand-400 hover:underline flex items-center gap-1">
+                <i class="fa-solid fa-calculator"></i> 实时验码
+              </button>
+            </div>
+            <input type="text" id="child_totp_secret" placeholder="例如: KZXW6YTBOI6Q2YZZ" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition uppercase">
+            <div id="child_totp_preview" class="mt-1.5 hidden flex items-center justify-between text-xs bg-slate-800/60 px-3 py-1 rounded-lg text-emerald-400 border border-emerald-500/20">
+              <span>当前 2FA 动态码: <b id="child_totp_code" class="text-sm tracking-wider">------</b></span>
+              <span id="child_totp_timer" class="text-slate-400 text-[11px]">30s</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 支付配置卡片 -->
+      <div class="bg-dark-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur-sm">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+          <div class="flex items-center space-x-2">
+            <span class="w-7 h-7 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center text-sm font-semibold">
+              <i class="fa-brands fa-stripe"></i>
+            </span>
+            <h2 class="text-sm font-bold text-white">Stripe 支付与代付配置</h2>
+          </div>
+          <div class="flex items-center space-x-2">
+            <span class="text-xs text-slate-400">自动代付</span>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" id="auto_pay" class="sr-only peer">
+              <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+            </label>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1">自定义工作区名称</label>
+              <input type="text" id="workspace_name" placeholder="Team Workspace" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-amber-400 mb-1 flex items-center gap-1">
+                <i class="fa-solid fa-tags text-[11px]"></i> 账单优惠码 (Promo Code)
+              </label>
+              <input type="text" id="promo_code" placeholder="例如: OPENAI50 / 折扣码" class="w-full bg-dark-950 border border-amber-500/40 rounded-xl px-3.5 py-2 text-sm text-amber-300 uppercase font-mono focus:outline-none focus:border-amber-400 transition">
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">信用卡卡号 (开启代付时必填)</label>
+            <input type="text" id="card_number" placeholder="4000 1234 5678 9010" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition font-mono">
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1">有效期 (MM/YY)</label>
+              <input type="text" id="card_exp" placeholder="12/28" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition font-mono">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1">安全码 (CVC)</label>
+              <input type="password" id="card_cvc" placeholder="123" maxlength="4" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition font-mono">
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1">持卡人姓名</label>
+              <input type="text" id="card_name" placeholder="John Doe" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1">免税州预设快速填入</label>
+              <select id="tax_free_preset" onchange="applyTaxFreePreset(this.value)" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 focus:outline-none focus:border-brand-500 transition">
+                <option value="de">⭐ 特拉华州 Delaware (19801) - 0% 消费税</option>
+                <option value="or">🌲 俄勒冈州 Oregon (97232) - 0% 消费税</option>
+                <option value="mt">🏔️ 蒙大拿州 Montana (59601) - 0% 消费税</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 美国免税地址详情 -->
+          <div class="pt-2 border-t border-slate-800/60">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-stamp text-[11px]"></i> 美国免税州账单地址 (0% 消费税)
+              </span>
+              <span class="text-[10px] text-slate-500">Stripe 结算 $0 税费</span>
+            </div>
+
+            <div class="space-y-2">
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-0.5">街道地址 (Address Line 1)</label>
+                <input type="text" id="billing_line1" value="1201 N Orange St" placeholder="1201 N Orange St" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand-500">
+              </div>
+
+              <div class="grid grid-cols-3 gap-2">
+                <div>
+                  <label class="block text-[11px] text-slate-400 mb-0.5">城市 (City)</label>
+                  <input type="text" id="billing_city" value="Wilmington" placeholder="Wilmington" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                </div>
+                <div>
+                  <label class="block text-[11px] text-slate-400 mb-0.5">州 (State)</label>
+                  <input type="text" id="billing_state" value="DE" placeholder="DE" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 uppercase font-mono focus:outline-none focus:border-brand-500">
+                </div>
+                <div>
+                  <label class="block text-[11px] text-slate-400 mb-0.5">邮政编码 (ZIP)</label>
+                  <input type="text" id="billing_zip" value="19801" placeholder="19801" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-amber-300 font-mono font-bold focus:outline-none focus:border-brand-500">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 运行环境与风控设置 -->
+      <div class="bg-dark-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl">
+        <h2 class="text-sm font-bold text-white pb-3 border-b border-slate-800 mb-4 flex items-center gap-2">
+          <i class="fa-solid fa-shield-halved text-brand-400"></i> 环境与防风控参数
+        </h2>
+        
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">住宅代理 / SOCKS5 出口</label>
+            <input type="text" id="http_proxy" placeholder="http://user:pass@host:port" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+            <p class="text-[11px] text-slate-500 mt-1">云主机部署强烈建议配置纯净住宅代理以防 Cloudflare 阻断</p>
+          </div>
+
+          <div class="flex items-center justify-between">
+            <div>
+              <span class="text-xs font-medium text-slate-300 block">无头浏览器静默运行 (Headless)</span>
+              <span class="text-[11px] text-slate-500">关闭后可在屏幕上直观观看浏览器点击与支付全流程</span>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" id="headless" class="sr-only peer">
+              <div class="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-brand-600"></div>
+            </label>
+          </div>
+
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-slate-400">防风控步间冷却延迟</span>
+              <span id="delay_label" class="text-brand-400 font-semibold">15 秒</span>
+            </div>
+            <input type="range" id="step_delay_seconds" min="5" max="60" value="15" oninput="document.getElementById('delay_label').innerText = this.value + ' 秒'" class="w-full accent-brand-500">
+          </div>
+
+          <button onclick="saveConfig()" class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold py-2.5 rounded-xl transition flex items-center justify-center space-x-2 text-sm shadow">
+            <i class="fa-solid fa-floppy-disk"></i>
+            <span>保存配置并应用</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 右侧：流程步进器、长链横幅与实时日志 (7列) -->
+    <div class="lg:col-span-7 flex flex-col space-y-6">
+
+      <!-- 控制指令卡片 -->
+      <div class="bg-dark-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl">
+        <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> 一键协同流水线
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">自动开通/代付 · 邀请 Owner · 转移主所有权 · 平滑脱离</p>
+          </div>
+
+          <div class="flex items-center space-x-2.5 w-full sm:w-auto">
+            <!-- 仅提取长链按钮 -->
+            <button onclick="extractLinkOnly()" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
+              <i class="fa-solid fa-link"></i>
+              <span>仅提取长链</span>
+            </button>
+            <!-- 启动全流程 -->
+            <button id="btn-start" onclick="startPipeline()" class="flex-1 sm:flex-none px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/25 flex items-center justify-center space-x-1.5 transition">
+              <i class="fa-solid fa-play"></i>
+              <span>启动全流程</span>
+            </button>
+            <!-- 中止 -->
+            <button id="btn-stop" onclick="stopPipeline()" class="px-3 py-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 font-semibold text-xs flex items-center justify-center space-x-1 transition">
+              <i class="fa-solid fa-stop"></i>
+              <span>中止</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 流程进度条 Stepper -->
+        <div class="mt-6 pt-5 border-t border-slate-800">
+          <div class="grid grid-cols-5 gap-2 text-center text-xs">
+            
+            <div id="step-node-1" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">1</div>
+              <div class="font-medium text-slate-300">母号登录</div>
+              <div class="text-[10px] text-slate-500 mt-0.5">长链/开通</div>
+            </div>
+
+            <div id="step-node-2" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">2</div>
+              <div class="font-medium text-slate-300">发放邀请</div>
+              <div class="text-[10px] text-slate-500 mt-0.5">Owner 授权</div>
+            </div>
+
+            <div id="step-node-3" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">3</div>
+              <div class="font-medium text-slate-300">子号入组</div>
+              <div class="text-[10px] text-slate-500 mt-0.5">接受邀请</div>
+            </div>
+
+            <div id="step-node-4" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">4</div>
+              <div class="font-medium text-slate-300">转让所有权</div>
+              <div class="text-[10px] text-slate-500 mt-0.5">Primary Owner</div>
+            </div>
+
+            <div id="step-node-5" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">5</div>
+              <div class="font-medium text-slate-300">母号脱离</div>
+              <div class="text-[10px] text-slate-500 mt-0.5">安全退组</div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- 支付长链展示横幅 (提取成功时高亮显示) -->
+      <div id="checkout-link-banner" class="hidden bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 shadow-xl">
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center space-x-2 text-amber-400 text-xs font-bold">
+            <i class="fa-solid fa-circle-check text-sm"></i>
+            <span>已成功提取到 Stripe 支付长链 (Checkout Session URL)</span>
+          </div>
+          <span class="text-[11px] text-slate-400">可复制给第三方或直接打开结算</span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <input type="text" id="checkout-url-input" readonly class="flex-1 bg-dark-950 border border-amber-500/30 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono focus:outline-none select-all">
+          <button onclick="copyCheckoutUrl()" class="px-3.5 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center space-x-1 transition">
+            <i class="fa-regular fa-copy"></i>
+            <span>复制长链</span>
+          </button>
+          <a id="checkout-url-link" href="#" target="_blank" class="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center space-x-1 transition">
+            <i class="fa-solid fa-arrow-up-right-from-square"></i>
+            <span>打开支付</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 实时日志终端窗口 -->
+      <div class="bg-dark-900 border border-slate-800 rounded-2xl flex-1 flex flex-col shadow-xl overflow-hidden min-h-[420px]">
+        <div class="bg-dark-950/80 px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+          <div class="flex items-center space-x-2">
+            <span class="w-3 h-3 rounded-full bg-rose-500/80 inline-block"></span>
+            <span class="w-3 h-3 rounded-full bg-amber-500/80 inline-block"></span>
+            <span class="w-3 h-3 rounded-full bg-emerald-500/80 inline-block"></span>
+            <span class="text-xs font-semibold text-slate-400 ml-2">Console Live Log</span>
+          </div>
+
+          <div class="flex items-center space-x-3 text-xs">
+            <button onclick="clearLogs()" class="text-slate-400 hover:text-slate-200 transition">
+              <i class="fa-solid fa-trash-can mr-1"></i> 清空
+            </button>
+            <label class="flex items-center space-x-1 text-slate-400 cursor-pointer">
+              <input type="checkbox" id="autoscroll" checked class="accent-brand-500">
+              <span>自动滚屏</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="log-terminal" class="flex-1 p-4 log-font text-xs overflow-y-auto space-y-1.5 bg-[#0d1017]">
+          <div class="text-slate-500 italic">// 控制台就绪，可点击上方「仅提取长链」或「启动全流程」...</div>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <script>
+    let ws = null;
+
+    window.addEventListener('DOMContentLoaded', () => {
+      loadConfig();
+      initWebSocket();
+    });
+
+    function togglePassword(inputId, btn) {
+      const input = document.getElementById(inputId);
+      const icon = btn.querySelector('i');
+      if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.remove('fa-eye');
+        icon.classList.add('fa-eye-slash');
+      } else {
+        input.type = 'password';
+        icon.classList.remove('fa-eye-slash');
+        icon.classList.add('fa-eye');
+      }
+    }
+
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/config');
+        const data = await res.json();
+        document.getElementById('master_email').value = data.master_email || '';
+        document.getElementById('master_password').value = data.master_password || '';
+        document.getElementById('master_totp_secret').value = data.master_totp_secret || '';
+        document.getElementById('child_email').value = data.child_email || '';
+        document.getElementById('child_password').value = data.child_password || '';
+        document.getElementById('child_totp_secret').value = data.child_totp_secret || '';
+        document.getElementById('http_proxy').value = data.http_proxy || '';
+        document.getElementById('headless').checked = !!data.headless;
+        document.getElementById('step_delay_seconds').value = data.step_delay_seconds || 15;
+        document.getElementById('delay_label').innerText = (data.step_delay_seconds || 15) + ' 秒';
+        
+        // 支付与免税地址配置
+        document.getElementById('workspace_name').value = data.workspace_name || 'Team Workspace';
+        document.getElementById('promo_code').value = data.promo_code || '';
+        document.getElementById('card_number').value = data.card_number || '';
+        document.getElementById('card_exp').value = data.card_exp || '';
+        document.getElementById('card_cvc').value = data.card_cvc || '';
+        document.getElementById('card_name').value = data.card_name || '';
+        document.getElementById('auto_pay').checked = !!data.auto_pay;
+        document.getElementById('billing_line1').value = data.billing_line1 || '1201 N Orange St';
+        document.getElementById('billing_city').value = data.billing_city || 'Wilmington';
+        document.getElementById('billing_state').value = data.billing_state || 'DE';
+        document.getElementById('billing_zip').value = data.billing_zip || '19801';
+
+      } catch (err) {
+        appendLog('error', '获取初始配置失败: ' + err.message);
+      }
+    }
+
+    function applyTaxFreePreset(val) {
+      if (val === 'de') {
+        document.getElementById('billing_line1').value = '1201 N Orange St';
+        document.getElementById('billing_city').value = 'Wilmington';
+        document.getElementById('billing_state').value = 'DE';
+        document.getElementById('billing_zip').value = '19801';
+      } else if (val === 'or') {
+        document.getElementById('billing_line1').value = '650 NE Holladay St';
+        document.getElementById('billing_city').value = 'Portland';
+        document.getElementById('billing_state').value = 'OR';
+        document.getElementById('billing_zip').value = '97232';
+      } else if (val === 'mt') {
+        document.getElementById('billing_line1').value = '1300 11th Ave';
+        document.getElementById('billing_city').value = 'Helena';
+        document.getElementById('billing_state').value = 'MT';
+        document.getElementById('billing_zip').value = '59601';
+      }
+    }
+
+    async function saveConfig(silent = false) {
+      const masterEmail = document.getElementById('master_email').value.trim();
+      const masterPass = document.getElementById('master_password').value.trim();
+
+      const payload = {
+        master_email: masterEmail,
+        master_password: masterPass,
+        master_totp_secret: document.getElementById('master_totp_secret').value.trim(),
+        child_email: document.getElementById('child_email').value.trim(),
+        child_password: document.getElementById('child_password').value.trim(),
+        child_totp_secret: document.getElementById('child_totp_secret').value.trim(),
+        http_proxy: document.getElementById('http_proxy').value.trim(),
+        headless: document.getElementById('headless').checked,
+        step_delay_seconds: parseInt(document.getElementById('step_delay_seconds').value),
+        workspace_name: document.getElementById('workspace_name').value.trim(),
+        promo_code: document.getElementById('promo_code').value.trim(),
+        card_number: document.getElementById('card_number').value.trim(),
+        card_exp: document.getElementById('card_exp').value.trim(),
+        card_cvc: document.getElementById('card_cvc').value.trim(),
+        card_name: document.getElementById('card_name').value.trim(),
+        auto_pay: document.getElementById('auto_pay').checked,
+        billing_country: 'US',
+        billing_line1: document.getElementById('billing_line1').value.trim(),
+        billing_city: document.getElementById('billing_city').value.trim(),
+        billing_state: document.getElementById('billing_state').value.trim(),
+        billing_zip: document.getElementById('billing_zip').value.trim(),
+      };
+
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const ret = await res.json();
+        if (!silent) {
+          alert('配置已成功保存！');
+        }
+        return true;
+      } catch (e) {
+        if (!silent) {
+          alert('保存失败: ' + e.message);
+        }
+        return false;
+      }
+    }
+
+    async function checkTotp(type) {
+      const secretInput = document.getElementById(`${type}_totp_secret`);
+      const secret = secretInput.value.trim();
+      if (!secret) {
+        alert('请先输入 TOTP Secret 密钥！');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/verify-totp', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({secret})
+        });
+        const ret = await res.json();
+        if (ret.valid) {
+          const previewBox = document.getElementById(`${type}_totp_preview`);
+          const codeEl = document.getElementById(`${type}_totp_code`);
+          const timerEl = document.getElementById(`${type}_totp_timer`);
+          previewBox.classList.remove('hidden');
+          codeEl.innerText = ret.code;
+          timerEl.innerText = ret.remaining_seconds + 's 后刷新';
+        } else {
+          alert('TOTP 密钥无效: ' + (ret.error || '解析失败'));
+        }
+      } catch (e) {
+        alert('请求失败: ' + e.message);
+      }
+    }
+
+    // 仅提取长链
+    async function extractLinkOnly() {
+      const masterEmail = document.getElementById('master_email').value.trim();
+      const masterPass = document.getElementById('master_password').value.trim();
+      if (!masterEmail || !masterPass) {
+        alert('请先在左侧输入母号邮箱与密码！');
+        return;
+      }
+
+      await saveConfig(true); // 自动静默保存最新配置
+      appendLog('info', '开始独立调用提取 Stripe 支付长链任务...');
+      try {
+        const res = await fetch('/api/payment/extract-link', {method: 'POST'});
+        const ret = await res.json();
+        if (ret.status === 'success' && ret.url) {
+          showCheckoutLink(ret.url);
+          appendLog('success', '长链提取成功！');
+        } else {
+          alert(ret.detail || ret.message || '提取长链失败');
+        }
+      } catch (e) {
+        alert('提取异常: ' + e.message);
+      }
+    }
+
+    function showCheckoutLink(url) {
+      const banner = document.getElementById('checkout-link-banner');
+      const input = document.getElementById('checkout-url-input');
+      const link = document.getElementById('checkout-url-link');
+      banner.classList.remove('hidden');
+      input.value = url;
+      link.href = url;
+    }
+
+    function copyCheckoutUrl() {
+      const input = document.getElementById('checkout-url-input');
+      input.select();
+      navigator.clipboard.writeText(input.value);
+      alert('已成功复制 Stripe 支付长链到剪贴板！');
+    }
+
+    async function startPipeline() {
+      const masterEmail = document.getElementById('master_email').value.trim();
+      const masterPass = document.getElementById('master_password').value.trim();
+      const childEmail = document.getElementById('child_email').value.trim();
+      const childPass = document.getElementById('child_password').value.trim();
+
+      if (!masterEmail || !masterPass) {
+        alert('请先在左侧完整输入母号邮箱与密码！');
+        return;
+      }
+      if (!childEmail || !childPass) {
+        alert('请先在左侧完整输入子号邮箱与密码！');
+        return;
+      }
+
+      await saveConfig(true); // 启动前自动同步表单配置到后端与环境
+
+      try {
+        const res = await fetch('/api/pipeline/start', {method: 'POST'});
+        const ret = await res.json();
+        if (res.ok) {
+          appendLog('info', '已成功下发全流程启动指令...');
+        } else {
+          alert(ret.detail || '启动失败');
+        }
+      } catch (e) {
+        alert('请求异常: ' + e.message);
+      }
+    }
+
+    async function stopPipeline() {
+      if (!confirm('确定要强行中止当前运行的任务吗？')) return;
+      try {
+        const res = await fetch('/api/pipeline/stop', {method: 'POST'});
+        const ret = await res.json();
+        appendLog('warning', ret.message);
+      } catch (e) {
+        alert('请求异常: ' + e.message);
+      }
+    }
+
+    function initWebSocket() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${location.host}/ws/logs`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        document.getElementById('ws-status-text').innerText = '通信已连接';
+        document.getElementById('ws-badge').classList.remove('opacity-50');
+      };
+
+      ws.onclose = () => {
+        document.getElementById('ws-status-text').innerText = '通信已断开，重连中...';
+        document.getElementById('ws-badge').classList.add('opacity-50');
+        setTimeout(initWebSocket, 3000);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'init') {
+          updateUIState(msg.data);
+          if (msg.data.checkout_url) {
+            showCheckoutLink(msg.data.checkout_url);
+          }
+          if (msg.data.logs) {
+            msg.data.logs.forEach(l => appendLog(l.level, l.message, l.time));
+          }
+        } else if (msg.type === 'log') {
+          appendLog(msg.data.level, msg.data.message, msg.data.time);
+        } else if (msg.type === 'state_change') {
+          updateUIState(msg.data);
+        } else if (msg.type === 'checkout_link') {
+          showCheckoutLink(msg.data.url);
+        }
+      };
+    }
+
+    function updateUIState(data) {
+      const statusText = document.getElementById('pipeline-status-text');
+      statusText.innerText = data.msg || data.status || '空闲就绪';
+
+      const currentStep = data.step || 0;
+      for (let i = 1; i <= 5; i++) {
+        const el = document.getElementById(`step-node-${i}`);
+        const icon = el.querySelector('.step-icon');
+        el.classList.remove('border-brand-500', 'bg-brand-500/10', 'border-emerald-500', 'bg-emerald-500/10');
+        icon.classList.remove('bg-brand-500', 'bg-emerald-500', 'text-white', 'animate-pulse');
+
+        if (i < currentStep || data.status === 'completed') {
+          el.classList.add('border-emerald-500/50', 'bg-emerald-500/5');
+          icon.classList.add('bg-emerald-500', 'text-white');
+          icon.innerHTML = '<i class="fa-solid fa-check"></i>';
+        } else if (i === currentStep && data.status === 'running') {
+          el.classList.add('border-brand-500', 'bg-brand-500/10');
+          icon.classList.add('bg-brand-500', 'text-white', 'animate-pulse');
+          icon.innerHTML = i;
+        } else {
+          icon.innerHTML = i;
+        }
+      }
+    }
+
+    function appendLog(level, message, timeStr) {
+      const terminal = document.getElementById('log-terminal');
+      const time = timeStr || new Date().toLocaleTimeString();
+      let colorClass = 'text-slate-300';
+      let tag = '[INFO]';
+      let tagBg = 'bg-slate-800 text-slate-300';
+
+      if (level === 'error') {
+        colorClass = 'text-rose-400';
+        tag = '[ERROR]';
+        tagBg = 'bg-rose-500/20 text-rose-400 border border-rose-500/30';
+      } else if (level === 'warning') {
+        colorClass = 'text-amber-400';
+        tag = '[WARN]';
+        tagBg = 'bg-amber-500/20 text-amber-400 border border-amber-500/30';
+      } else if (level === 'success') {
+        colorClass = 'text-emerald-400 font-medium';
+        tag = '[SUCCESS]';
+        tagBg = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+      }
+
+      const logRow = document.createElement('div');
+      logRow.className = 'flex items-start space-x-2 leading-relaxed';
+      logRow.innerHTML = `
+        <span class="text-slate-600 select-none text-[10px] pt-0.5">${time}</span>
+        <span class="px-1.5 py-0.2 rounded text-[10px] font-semibold ${tagBg} select-none">${tag}</span>
+        <span class="flex-1 ${colorClass}">${escapeHtml(message)}</span>
+      `;
+      terminal.appendChild(logRow);
+
+      if (document.getElementById('autoscroll').checked) {
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+    }
+
+    function clearLogs() {
+      document.getElementById('log-terminal').innerHTML = '<div class="text-slate-500 italic">// 日志已清空...</div>';
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.innerText = text;
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>
