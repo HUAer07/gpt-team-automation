@@ -22,19 +22,6 @@ from auth import Authenticator, AuthSession
 from team_client import TeamClient
 from payment import PaymentManager
 
-# 自动激活 Xvfb 虚拟显卡环境 (为无头 Linux/Docker 提供完整图形栈，免遭 Cloudflare 拦截)
-if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-    try:
-        subprocess.Popen(
-            ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        os.environ["DISPLAY"] = ":99"
-        logger.info("已自动激活后台 Xvfb 虚拟显卡环境 (DISPLAY=:99)")
-    except Exception as e:
-        logger.warning(f"激活 Xvfb 虚拟环境失败: {e}")
-
 app = FastAPI(title="ChatGPT Team Automation Dashboard")
 
 app.add_middleware(

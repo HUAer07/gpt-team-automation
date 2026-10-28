@@ -20,5 +20,5 @@ COPY . .
 
 EXPOSE 8899
 
-# 启动 Web 控制台服务
-CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8899"]
+# 启动 Web 控制台服务 (通过 xvfb-run 原生虚拟显卡环境启动，全自动绕过 Cloudflare)
+CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24 -ac", "python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8899"]
