@@ -104,7 +104,7 @@ class ConfigPayload(BaseModel):
     child_password: str
     child_totp_secret: str
     http_proxy: Optional[str] = ""
-    headless: bool = False
+    headless: bool = True
     step_delay_seconds: int = 15
     workspace_name: str = "Team Workspace"
     promo_code: Optional[str] = ""

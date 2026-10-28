@@ -75,7 +75,7 @@ class CardConfig(BaseModel):
 
 class Settings(BaseModel):
     http_proxy: Optional[str] = Field(default_factory=lambda: os.getenv("HTTP_PROXY"))
-    headless: bool = Field(default_factory=lambda: os.getenv("HEADLESS", "false").lower() == "true")
+    headless: bool = Field(default_factory=lambda: os.getenv("HEADLESS", "true").lower() == "true")
     step_delay: int = Field(default_factory=lambda: int(os.getenv("STEP_DELAY_SECONDS", "15")))
     
     master: AccountConfig = Field(

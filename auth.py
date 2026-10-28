@@ -31,8 +31,15 @@ class Authenticator:
         if proxy_dict:
             logger.info(f"浏览器挂载代理: {proxy_dict.get('server')}")
         
+        # 判断运行环境：如果在无图形界面的 Linux（如云服务器/Docker容器），自动使用无头模式
+        is_headless = settings.headless
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            if not is_headless:
+                logger.info("检测到云端服务器无图形显示环境，已自动适配为无头静默运行模式")
+            is_headless = True
+
         browser = await p.chromium.launch(
-            headless=settings.headless,
+            headless=is_headless,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
