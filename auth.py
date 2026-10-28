@@ -114,20 +114,62 @@ class Authenticator:
                 except Exception as e:
                     logger.warning(f"打开登录页延迟较高: {e}")
 
-                # 检查是否触发了 Cloudflare 质询或 Oops 页面
-                await self.wait_for_cloudflare(page)
-                await self.check_and_recover_error(page)
-
-                # 点击初始登录按钮 (若页面停留在选择登录/注册首页)
-                login_btn = page.locator('button[data-testid="login-button"], button:text-is("Log in"), button:text-is("登录")').first
-                if await login_btn.is_visible(timeout=3000):
-                    await login_btn.click()
-                    await asyncio.sleep(2)
-                    await self.wait_for_cloudflare(page)
-
-                # 1. 查找并输入邮箱
+                # 动态等待：一边穿透 Cloudflare，一边等待登录表单或邮箱输入框就绪 (最多等待 90 秒)
+                start_load = time.time()
+                email_ready = False
                 email_input = page.locator('input[name="username"], input[type="email"], input[id="email-input"]').first
-                await email_input.wait_for(state="visible", timeout=45000)
+
+                while time.time() - start_load < 90:
+                    title = await page.title()
+                    # 1. 如果还在 Cloudflare 质询中，自动点击并等待放行
+                    if "just a moment" in title.lower() or "cloudflare" in title.lower():
+                        logger.info(f"[{self.account.email}] 正在等待 Cloudflare 质询通过 (自动点击辅助)...")
+                        try:
+                            cf_iframe = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"]').first
+                            if await cf_iframe.is_visible(timeout=1000):
+                                box = await cf_iframe.bounding_box()
+                                if box:
+                                    await page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
+                                else:
+                                    await cf_iframe.click(timeout=1000)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+                        continue
+
+                    # 2. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱输入页
+                    login_btn = page.locator('button[data-testid="login-button"], button:text-is("Log in"), button:text-is("登录")').first
+                    if await login_btn.is_visible(timeout=1000):
+                        logger.info("点击初始【Log in / 登录】按钮...")
+                        await login_btn.click()
+                        await asyncio.sleep(2)
+                        continue
+
+                    # 3. 检查是否有 Cookie 接受弹窗 (Accept all / 全部接受)
+                    cookie_btn = page.locator('button:text-is("Accept all"), button:text-is("全部接受")').first
+                    if await cookie_btn.is_visible(timeout=500):
+                        await cookie_btn.click()
+                        await asyncio.sleep(0.5)
+
+                    # 4. 检查邮箱输入框是否已经呈现
+                    if await email_input.is_visible(timeout=1000):
+                        logger.info(f"[{self.account.email}] 登录页加载完成，邮箱输入框就绪！")
+                        email_ready = True
+                        break
+
+                    # 5. 检查是否有 Try again 按钮
+                    await self.check_and_recover_error(page)
+                    await asyncio.sleep(1.5)
+
+                if not email_ready:
+                    try:
+                        screenshot_path = str(Path(__file__).parent / "static" / "cf_timeout.png")
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        logger.warning(f"[{self.account.email}] 登录页等待超时，已保存截图: /static/cf_timeout.png")
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"登录页等待超时，当前页面: {await page.title()} ({page.url})")
+
                 logger.info(f"[{self.account.email}] 正在输入邮箱...")
                 await email_input.fill(self.account.email)
                 await asyncio.sleep(0.5)
