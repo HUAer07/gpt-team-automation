@@ -126,7 +126,8 @@ class Authenticator:
             if "just a moment" in title or "cloudflare" in title:
                 return True, f"页面标题拦截: '{title}'"
         except Exception:
-            pass
+            # 页面跳转/网络握手中，保持处于拦截等待状态
+            return True, "页面正在跳转/重载中"
 
         # 1. 穿透 Shadow DOM：检查所有 Frame 是否包含 Cloudflare Turnstile 质询
         try:
@@ -159,46 +160,48 @@ class Authenticator:
 
         return False, ""
 
-    async def handle_cloudflare(self, page: Page, max_wait: int = 150) -> bool:
+    async def handle_cloudflare(self, page: Page, max_wait: int = 180) -> bool:
         """
         智能处理 Cloudflare Turnstile 质询：
         - 准确定位 Turnstile 质询状态
-        - 仅在呈现复选框且未处于验证中时点击一次
-        - 点击后进入 Verifying... 旋转认证阶段，绝不重复点击
-        - 耐心静默等待后台加密证明与网络交互完成
-        - 严格以登录表单就绪或质询彻底消失为放行标志
+        - 仅在呈现复选框且未处于验证中时点击一次 (绝对禁止二次重复点击打断)
+        - 耐心等待后台加密证明与网络交互完成
+        - 严格以目标表单元素就绪或标题彻底改变为放行标志
         """
         start_time = time.time()
         has_clicked = False
-        last_click_time = 0
         last_log_time = 0
         consecutive_passed_checks = 0
 
         logger.info(f"[{self.account.email}] 正在介入 Cloudflare 质询检测与穿透处理...")
 
         while time.time() - start_time < max_wait:
-            is_cf, reason = await self.is_in_cloudflare(page)
-
-            # 快速检查：如果邮箱输入框或登录按钮已出现，说明已经完全穿透放行！
+            # 1. 快速检查：如果邮箱输入框、密码框或登录按钮已出现，说明已经完全穿透放行！
             try:
-                email_or_login = page.locator('input[name="username"], input[type="email"], input[id="email-input"], button[data-testid="login-button"]').first
-                if await email_or_login.is_visible(timeout=300):
-                    logger.info(f"[{self.account.email}] Cloudflare 质询已完全放行，目标表单元素就绪！")
+                target_elem = page.locator(
+                    'input[name="username"], input[type="email"], input[id="email-input"], '
+                    'input[name="password"], button[data-testid="login-button"]'
+                ).first
+                if await target_elem.is_visible(timeout=300):
+                    logger.info(f"[{self.account.email}] 目标登录表单元素已呈现，Cloudflare 质询彻底放行通过！")
                     return True
             except Exception:
                 pass
 
-            if not is_cf:
-                # 需要连续 2 次检测均为非 Cloudflare 状态，避免页面跳转空白期误判
-                consecutive_passed_checks += 1
-                if consecutive_passed_checks >= 2:
-                    logger.info(f"[{self.account.email}] Cloudflare 质询已解除放行！")
-                    return True
-                await asyncio.sleep(2)
-                continue
-            else:
+            # 2. 检查页面标题：只有标题不再是 'just a moment' 且非空，且连续确认 3 次才算解除
+            try:
+                curr_title = (await page.title()).lower()
+                if curr_title and "just a moment" not in curr_title and "cloudflare" not in curr_title:
+                    consecutive_passed_checks += 1
+                    if consecutive_passed_checks >= 3:
+                        logger.info(f"[{self.account.email}] 页面标题已正常恢复 ('{curr_title}')，Cloudflare 质询放行！")
+                        return True
+                else:
+                    consecutive_passed_checks = 0
+            except Exception:
                 consecutive_passed_checks = 0
 
+            is_cf, reason = await self.is_in_cloudflare(page)
             now = time.time()
             elapsed = int(now - start_time)
 
@@ -219,16 +222,6 @@ class Authenticator:
             except Exception:
                 pass
 
-            # 兼容外层页面文本
-            if not is_verifying:
-                try:
-                    for v_text in ["Verifying...", "正在验证"]:
-                        if await page.locator(f'text="{v_text}"').first.is_visible(timeout=150):
-                            is_verifying = True
-                            break
-                except Exception:
-                    pass
-
             if is_verifying:
                 # 正在旋转认证，绝对不可重复点击打断，耐心静默等待
                 if now - last_log_time >= 6:
@@ -237,8 +230,8 @@ class Authenticator:
                 await asyncio.sleep(2)
                 continue
 
-            # 尚未进入 Verifying 且未点击过 (或距离上次点击已超过 45 秒未响应)，触发一次点击
-            if not has_clicked or (now - last_click_time > 45):
+            # 仅在未点击过时触发一次点击 (绝不重复点击打断当前认证)
+            if not has_clicked:
                 clicked_successfully = False
                 # 方式 1: 穿透 Shadow DOM，遍历所有 frame 捕获 challenges.cloudflare.com 真实屏幕位置
                 for f in page.frames:
@@ -279,36 +272,15 @@ class Authenticator:
                         except Exception as e:
                             logger.debug(f"Frame 定位异常: {e}")
 
-                # 方式 2: 常规 locator 备用定位
-                if not clicked_successfully:
-                    cf_iframe = page.locator(
-                        'iframe[src*="challenges.cloudflare.com"], '
-                        'iframe[src*="turnstile"], '
-                        'iframe[title*="Cloudflare"], '
-                        'iframe[title*="Turnstile"]'
-                    ).first
-                    try:
-                        if await cf_iframe.is_visible(timeout=500):
-                            box = await cf_iframe.bounding_box()
-                            if box:
-                                await page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
-                                clicked_successfully = True
-                            else:
-                                await cf_iframe.click(timeout=1000)
-                                clicked_successfully = True
-                    except Exception as e:
-                        logger.debug(f"点击 Cloudflare 质询组件异常: {e}")
-
                 if clicked_successfully:
                     has_clicked = True
-                    last_click_time = now
-                    logger.info(f"[{self.account.email}] 已成功点击验证复选框，等待圆圈转完认证...")
+                    logger.info(f"[{self.account.email}] 已成功点击验证复选框，系统进入静默等待认证状态 (不重复点击)...")
             else:
                 if now - last_log_time >= 8:
                     logger.info(f"[{self.account.email}] Cloudflare 质询等待中 ({reason}，已耗时 {elapsed} 秒)...")
                     last_log_time = now
 
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(2)
 
         logger.warning(f"[{self.account.email}] Cloudflare 质询等待超出 {max_wait} 秒")
         return False
