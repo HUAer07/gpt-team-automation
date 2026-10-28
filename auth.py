@@ -79,22 +79,87 @@ class Authenticator:
             return True
         return False
 
-    async def wait_for_cloudflare(self, page: Page, max_wait: int = 15):
-        """检测并等待 Cloudflare Turnstile 质询自动穿透放行"""
-        start = time.time()
-        while time.time() - start < max_wait:
-            title = await page.title()
-            if "just a moment" in title.lower() or "cloudflare" in title.lower():
-                logger.info(f"[{self.account.email}] 检测到 Cloudflare 质询拦截，正在等待自动穿透验证...")
+    async def handle_cloudflare(self, page: Page, max_wait: int = 120) -> bool:
+        """
+        智能处理 Cloudflare Turnstile 质询：
+        - 检测页面标题或 Turnstile 质询元素
+        - 若出现复选框，只点击一次触发验证
+        - 点击后静默等待圆圈转完 (验证计算与放行)，绝不反复点击打断质询
+        - 给予最长 max_wait 秒充足等待时间以应对高延迟代理
+        """
+        start_time = time.time()
+        has_clicked = False
+        last_click_time = 0
+        last_log_time = 0
+
+        while time.time() - start_time < max_wait:
+            try:
+                title = (await page.title()).lower()
+            except Exception:
+                title = ""
+            
+            is_cf_page = "just a moment" in title or "cloudflare" in title
+
+            # 检查是否有 Turnstile iframe
+            cf_iframe = page.locator(
+                'iframe[src*="challenges.cloudflare.com"], '
+                'iframe[src*="turnstile"], '
+                'iframe[title*="Cloudflare"], '
+                'iframe[title*="Turnstile"]'
+            ).first
+            
+            cf_visible = False
+            try:
+                cf_visible = await cf_iframe.is_visible(timeout=500)
+            except Exception:
+                pass
+
+            if not is_cf_page and not cf_visible:
+                # 已经离开 Cloudflare 质询状态
+                if has_clicked:
+                    logger.info(f"[{self.account.email}] Cloudflare 质询认证通过，已成功放行！")
+                return True
+
+            now = time.time()
+            elapsed = int(now - start_time)
+
+            # 仅在未点击过，或首次点击后超过 40 秒仍未通过时才尝试点击
+            if not has_clicked or (now - last_click_time > 40):
                 try:
-                    cf_box = page.frame_locator('iframe[src*="cloudflare"], iframe[src*="turnstile"]').locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
-                    if await cf_box.is_visible(timeout=800):
-                        await cf_box.click(timeout=800)
-                except Exception:
-                    pass
-                await asyncio.sleep(1.5)
+                    if cf_visible:
+                        box = await cf_iframe.bounding_box()
+                        if box:
+                            logger.info(f"[{self.account.email}] 检测到 Cloudflare 验证框，正在点击复选框启动认证...")
+                            # 复选框通常在 iframe 左侧约 30px 位置
+                            await page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
+                        else:
+                            await cf_iframe.click(timeout=1000)
+                    else:
+                        # 尝试通过 frame_locator 触发点击
+                        cf_box = page.frame_locator('iframe[src*="cloudflare"], iframe[src*="turnstile"]').locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
+                        if await cf_box.is_visible(timeout=800):
+                            await cf_box.click(timeout=800)
+                    
+                    has_clicked = True
+                    last_click_time = now
+                    logger.info(f"[{self.account.email}] 已点击验证框，圆圈正在旋转认证，静默等待放行 (请勿打断)...")
+                except Exception as e:
+                    logger.debug(f"点击 Cloudflare 验证框异常: {e}")
             else:
-                break
+                # 处于静默等待阶段，不重复点击，每隔 8 秒打印一次进度让用户知晓
+                if now - last_log_time >= 8:
+                    logger.info(f"[{self.account.email}] Cloudflare 质询认证中 (圆圈旋转中，已等待 {elapsed} 秒)，静默等待放行...")
+                    last_log_time = now
+
+            # 静默等待，避免高频轮询
+            await asyncio.sleep(2.5)
+
+        logger.warning(f"[{self.account.email}] 等待 Cloudflare 超过 {max_wait} 秒")
+        return False
+
+    async def wait_for_cloudflare(self, page: Page, max_wait: int = 30):
+        """兼容旧调用的快捷入口"""
+        return await self.handle_cloudflare(page, max_wait=max_wait)
 
     async def login(self, p) -> AuthSession:
         if not self.account.email or not self.account.password:
@@ -114,32 +179,33 @@ class Authenticator:
                 except Exception as e:
                     logger.warning(f"打开登录页延迟较高: {e}")
 
-                # 动态等待：一边穿透 Cloudflare，一边等待登录表单或邮箱输入框就绪 (最多等待 90 秒)
+                # 动态等待：一边穿透 Cloudflare，一边等待登录表单或邮箱输入框就绪 (最多等待 120 秒)
                 start_load = time.time()
                 email_ready = False
                 email_input = page.locator('input[name="username"], input[type="email"], input[id="email-input"]').first
 
-                while time.time() - start_load < 90:
-                    title = await page.title()
-                    # 1. 如果还在 Cloudflare 质询中，自动点击并等待放行
-                    if "just a moment" in title.lower() or "cloudflare" in title.lower():
-                        logger.info(f"[{self.account.email}] 正在等待 Cloudflare 质询通过 (自动点击辅助)...")
-                        try:
-                            cf_iframe = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"]').first
-                            if await cf_iframe.is_visible(timeout=1000):
-                                box = await cf_iframe.bounding_box()
-                                if box:
-                                    await page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
-                                else:
-                                    await cf_iframe.click(timeout=1000)
-                        except Exception:
-                            pass
-                        await asyncio.sleep(2)
+                while time.time() - start_load < 120:
+                    try:
+                        title = (await page.title()).lower()
+                    except Exception:
+                        title = ""
+
+                    # 1. 如果检测到 Cloudflare 质询拦截，交给专职函数处理 (静默等待转圈完成放行)
+                    cf_iframe = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"]').first
+                    is_cf = "just a moment" in title or "cloudflare" in title
+                    try:
+                        if not is_cf and await cf_iframe.is_visible(timeout=300):
+                            is_cf = True
+                    except Exception:
+                        pass
+
+                    if is_cf:
+                        await self.handle_cloudflare(page, max_wait=90)
                         continue
 
                     # 2. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱输入页
                     login_btn = page.locator('button[data-testid="login-button"], button:text-is("Log in"), button:text-is("登录")').first
-                    if await login_btn.is_visible(timeout=1000):
+                    if await login_btn.is_visible(timeout=800):
                         logger.info("点击初始【Log in / 登录】按钮...")
                         await login_btn.click()
                         await asyncio.sleep(2)
@@ -190,26 +256,58 @@ class Authenticator:
                     except Exception:
                         pass
                 
-                logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (代理加载中)...")
+                logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (兼顾 Cloudflare 与网络延迟)...")
 
-                # 检查是否出现错误页面或 Try again
-                await self.check_and_recover_error(page)
-
-                # 2. 查找并输入密码
+                # 2. 查找并输入密码 (支持兼顾提交邮箱后弹出的 Cloudflare 质询)
                 password_input = page.locator('input[name="password"], input[type="password"], input#password').first
-                try:
-                    await password_input.wait_for(state="visible", timeout=60000)
-                except Exception:
-                    # 如果等待密码框超时，二次检测是否掉到了 Oops / Try again 页面
+                start_pwd_wait = time.time()
+                pwd_ready = False
+
+                while time.time() - start_pwd_wait < 90:
+                    try:
+                        title = (await page.title()).lower()
+                    except Exception:
+                        title = ""
+
+                    # 检查中途是否弹出 Cloudflare 质询拦截
+                    cf_iframe = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"]').first
+                    is_cf = "just a moment" in title or "cloudflare" in title
+                    try:
+                        if not is_cf and await cf_iframe.is_visible(timeout=300):
+                            is_cf = True
+                    except Exception:
+                        pass
+
+                    if is_cf:
+                        await self.handle_cloudflare(page, max_wait=90)
+                        continue
+
+                    # 检查密码框是否呈现
+                    if await password_input.is_visible(timeout=1000):
+                        pwd_ready = True
+                        break
+
+                    # 检查是否有 Try again 按钮
                     if await self.check_and_recover_error(page):
-                        await password_input.wait_for(state="visible", timeout=30000)
-                    else:
-                        current_url = page.url
-                        logger.error(f"[{self.account.email}] 密码输入框未出现！当前页面 URL: {current_url}")
-                        if attempt < 2:
-                            logger.warning("尝试刷新页面重走登录流程...")
-                            continue
-                        raise
+                        await asyncio.sleep(2)
+                        continue
+
+                    # 备用：如果邮箱提交按钮还在，再次触发提交
+                    if await continue_btn.is_visible(timeout=500):
+                        try:
+                            await continue_btn.click(timeout=500)
+                        except Exception:
+                            pass
+
+                    await asyncio.sleep(1.5)
+
+                if not pwd_ready:
+                    current_url = page.url
+                    logger.error(f"[{self.account.email}] 密码输入框未出现！当前页面 URL: {current_url}")
+                    if attempt < 2:
+                        logger.warning("尝试刷新页面重走登录流程...")
+                        continue
+                    raise TimeoutError(f"等待密码输入框超时: {current_url}")
 
                 logger.info(f"[{self.account.email}] 正在输入密码...")
                 await password_input.fill(self.account.password)
@@ -241,6 +339,15 @@ class Authenticator:
                         logger.info(f"[{self.account.email}] 账号已成功进入 ChatGPT 主界面")
                         login_success = True
                         break
+
+                    # 检查是否有 Cloudflare 拦截
+                    try:
+                        title = (await page.title()).lower()
+                    except Exception:
+                        title = ""
+                    if "just a moment" in title or "cloudflare" in title:
+                        await self.handle_cloudflare(page, max_wait=60)
+                        continue
 
                     # B. 检查是否有 Try again 按钮 (发生网络超时时自动重试)
                     if await self.check_and_recover_error(page):
