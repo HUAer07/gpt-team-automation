@@ -39,6 +39,18 @@ STATIC_DIR.mkdir(exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+@app.get("/api/screenshot")
+async def get_live_screenshot():
+    """实时捕获 Xvfb 虚拟显卡当前屏幕并返回图片 (无缓存)"""
+    screen_path = STATIC_DIR / "live_screen.png"
+    try:
+        subprocess.run(["scrot", str(screen_path)], env=dict(os.environ, DISPLAY=":99"), timeout=3)
+        if screen_path.exists():
+            return FileResponse(str(screen_path), media_type="image/png", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+    except Exception as e:
+        logger.error(f"捕获实时屏幕截图失败: {e}")
+    raise HTTPException(status_code=500, detail="Failed to capture screenshot")
+
 # 全局任务状态管理
 class PipelineState:
     def __init__(self):
