@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import time
+from pathlib import Path
 import pyotp
 from typing import Dict, Optional, Tuple
 from loguru import logger
@@ -109,11 +110,7 @@ class Authenticator:
                 await email_input.fill(self.account.email)
                 await asyncio.sleep(0.5)
 
-                # 表单回车提交邮箱
-                await email_input.press("Enter")
-                await asyncio.sleep(1.5)
-
-                # 排除 Google/Microsoft/Apple 的第三方登录，备用点击
+                # 提交邮箱 (单一提交方式，优先点按钮，避免双重提交导致 Auth0 报错)
                 continue_btn = page.locator(
                     'button[name="action"][value="default"], '
                     'form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")), '
@@ -122,13 +119,13 @@ class Authenticator:
                 ).first
                 if await continue_btn.is_visible(timeout=1500):
                     await continue_btn.click()
+                else:
+                    await email_input.press("Enter")
                 
                 logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (代理加载中)...")
 
                 # 检查是否出现错误页面或 Try again
-                recovered = await self.check_and_recover_error(page)
-                if recovered:
-                    logger.info("已尝试恢复，重新进入等待流程...")
+                await self.check_and_recover_error(page)
 
                 # 2. 查找并输入密码
                 password_input = page.locator('input[name="password"], input[type="password"], input#password').first
@@ -137,7 +134,6 @@ class Authenticator:
                 except Exception:
                     # 如果等待密码框超时，二次检测是否掉到了 Oops / Try again 页面
                     if await self.check_and_recover_error(page):
-                        # 如果点击 Try again 后重新出现密码框，继续输入
                         await password_input.wait_for(state="visible", timeout=30000)
                     else:
                         current_url = page.url
@@ -151,9 +147,7 @@ class Authenticator:
                 await password_input.fill(self.account.password)
                 await asyncio.sleep(0.5)
 
-                await password_input.press("Enter")
-                await asyncio.sleep(1.5)
-
+                # 提交密码 (优先点击提交按钮，避免与 Enter 发生双重提交触发 Operation timed out)
                 pwd_submit = page.locator(
                     'button[name="action"][value="default"], '
                     'form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")), '
@@ -162,23 +156,44 @@ class Authenticator:
                 ).first
                 if await pwd_submit.is_visible(timeout=1500):
                     await pwd_submit.click()
+                else:
+                    await password_input.press("Enter")
                 
                 logger.info(f"[{self.account.email}] 已提交密码，正在监听后续跳转 (主页直通 或 2FA 页面)...")
                 
-                # 检查是否提交密码后提示 Oops
-                await asyncio.sleep(2)
-                await self.check_and_recover_error(page)
+                # 3. 统一智能轮询状态机 (兼顾 2FA、密码回退、网络超时与主页直通，最多等待 120 秒)
+                start_poll = time.time()
+                mfa_submitted = False
+                login_success = False
 
-                # 3. 动态等待并捕获 2FA 页面
-                mfa_detected = False
-                start_mfa_wait = time.time()
-
-                while time.time() - start_mfa_wait < 60:
+                while time.time() - start_poll < 120:
                     cur_url = page.url
+                    # A. 成功到达 ChatGPT 主界面
                     if "chatgpt.com" in cur_url and "auth" not in cur_url:
-                        logger.info(f"[{self.account.email}] 账号已成功进入 ChatGPT 主页 (无需 2FA)")
+                        logger.info(f"[{self.account.email}] 账号已成功进入 ChatGPT 主界面")
+                        login_success = True
                         break
 
+                    # B. 检查是否有 Try again 按钮
+                    if await self.check_and_recover_error(page):
+                        await asyncio.sleep(2)
+                        continue
+
+                    # C. 检查密码框是否重新出现 (若因网络重试回退到密码页)
+                    pwd_reappear = page.locator('input[name="password"], input[type="password"]').first
+                    if await pwd_reappear.is_visible(timeout=500):
+                        logger.info(f"[{self.account.email}] 页面回退至密码输入页，重新填充密码并提交...")
+                        await pwd_reappear.fill(self.account.password)
+                        await asyncio.sleep(0.5)
+                        sub_btn = page.locator('button[name="action"][value="default"], form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple"))').first
+                        if await sub_btn.is_visible():
+                            await sub_btn.click()
+                        else:
+                            await pwd_reappear.press("Enter")
+                        await asyncio.sleep(2)
+                        continue
+
+                    # D. 检查 2FA 动态码输入框
                     code_input = page.locator(
                         'input[autocomplete="one-time-code"]:not([readonly]), '
                         'input[inputmode="numeric"]:not([readonly]), '
@@ -188,44 +203,39 @@ class Authenticator:
                         'input[placeholder*="code" i]:not([readonly]), '
                         'input[type="text"]:not([readonly]):not([placeholder*="email" i]):not([value*="@"])'
                     ).first
-                    
+
                     is_mfa_url = "mfa" in cur_url or "challenge" in cur_url
-                    has_code_input = await code_input.is_visible(timeout=1000)
-
-                    if is_mfa_url or has_code_input:
+                    if (is_mfa_url or await code_input.is_visible(timeout=800)) and not mfa_submitted:
                         logger.info(f"[{self.account.email}] 成功捕获 2FA 认证页面 (当前URL: {cur_url})")
-                        mfa_detected = True
-                        
-                        await code_input.wait_for(state="visible", timeout=30000)
-                        
-                        if await code_input.get_attribute("readonly") is not None:
-                            code_input = page.locator('input:not([readonly]):not([type="hidden"]):not([placeholder*="email" i])').first
-                            await code_input.wait_for(state="visible", timeout=10000)
-
                         totp_code = self.get_totp_code()
                         logger.info(f"[{self.account.email}] 正在自动填入 2FA 动态码: {totp_code}")
                         await code_input.click()
                         await code_input.fill(totp_code)
                         await asyncio.sleep(0.5)
 
-                        await code_input.press("Enter")
-                        await asyncio.sleep(1)
-
                         code_submit = page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("Verify"), button:has-text("继续")').first
-                        if await code_submit.is_visible(timeout=2000):
+                        if await code_submit.is_visible(timeout=1500):
                             await code_submit.click()
-                        
-                        logger.info(f"[{self.account.email}] 2FA 动态码已提交，等待最终跳转...")
-                        break
+                        else:
+                            await code_input.press("Enter")
 
-                    # 循环中也检查是否有 Oops 报错
-                    await self.check_and_recover_error(page)
-                    await asyncio.sleep(1)
+                        mfa_submitted = True
+                        logger.info(f"[{self.account.email}] 2FA 动态码已提交，等待主页跳转...")
+                        await asyncio.sleep(2)
+                        continue
 
-                # 4. 等待完成跳转至 ChatGPT 主页面
-                logger.info(f"[{self.account.email}] 等待进入 ChatGPT 主界面...")
-                await page.wait_for_url(lambda url: "chatgpt.com" in url and "auth" not in url, timeout=90000)
-                logger.info(f"[{self.account.email}] 成功进入 ChatGPT 主界面")
+                    await asyncio.sleep(1.5)
+
+                if not login_success:
+                    # 截图保存调试现场
+                    try:
+                        screenshot_path = str(Path(__file__).parent / "static" / "error_last_page.png")
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        logger.warning(f"[{self.account.email}] 登录耗时超出预期，已截取当前屏幕: /static/error_last_page.png")
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"登录流程超时未能进入 ChatGPT 主页，当前页面 URL: {page.url}")
+
                 break
 
             # 5. 提取 Session 与 Token
