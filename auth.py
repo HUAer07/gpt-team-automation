@@ -174,23 +174,19 @@ class Authenticator:
                         login_success = True
                         break
 
-                    # B. 检查是否有 Try again 按钮
+                    # B. 检查是否有 Try again 按钮 (发生网络超时时自动重试)
                     if await self.check_and_recover_error(page):
                         await asyncio.sleep(2)
-                        continue
-
-                    # C. 检查密码框是否重新出现 (若因网络重试回退到密码页)
-                    pwd_reappear = page.locator('input[name="password"], input[type="password"]').first
-                    if await pwd_reappear.is_visible(timeout=500):
-                        logger.info(f"[{self.account.email}] 页面回退至密码输入页，重新填充密码并提交...")
-                        await pwd_reappear.fill(self.account.password)
-                        await asyncio.sleep(0.5)
-                        sub_btn = page.locator('button[name="action"][value="default"], form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple"))').first
-                        if await sub_btn.is_visible():
-                            await sub_btn.click()
-                        else:
-                            await pwd_reappear.press("Enter")
-                        await asyncio.sleep(2)
+                        pwd_box = page.locator('input[name="password"], input[type="password"]').first
+                        if await pwd_box.is_visible(timeout=1000) and await pwd_box.is_enabled():
+                            logger.info(f"[{self.account.email}] 恢复后重新输入密码...")
+                            await pwd_box.fill(self.account.password)
+                            await asyncio.sleep(0.5)
+                            sub_btn = page.locator('button[name="action"][value="default"], form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple"))').first
+                            if await sub_btn.is_visible(timeout=1000):
+                                await sub_btn.click()
+                            else:
+                                await pwd_box.press("Enter")
                         continue
 
                     # D. 检查 2FA 动态码输入框
