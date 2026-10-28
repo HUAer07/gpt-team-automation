@@ -53,7 +53,10 @@ class Authenticator:
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
                 "--window-size=1280,800",
-            ]
+                "--no-first-run",
+                "--password-store=basic",
+            ],
+            "ignore_default_args": ["--enable-automation"],
         }
         # 优先使用官方 Google Chrome，无缝避开 Chromium 自动化签名风控
         if os.path.exists("/usr/bin/google-chrome"):
@@ -71,26 +74,38 @@ class Authenticator:
         )
         
         await context.add_init_script("""
-            // 屏蔽虚拟显卡 SwiftShader 特征，模拟真实 Intel GPU
+            // 1. 彻底清除原型链上的自动化特征 (与普通真实浏览器完全一致)
+            try {
+                const proto = Object.getPrototypeOf(navigator);
+                delete proto.webdriver;
+            } catch (e) {}
+
+            // 2. 真实 Linux Intel GPU WebGL 指纹 (杜绝 Windows Direct3D 在 Linux 下被判定为伪造机器人的致命矛盾)
             const getParameter = WebGLRenderingContext.prototype.getParameter;
             WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                if (parameter === 37445) return 'Google Inc. (Intel)';
-                if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                if (parameter === 37445) return 'Intel Open Source Technology Center';
+                if (parameter === 37446) return 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
                 return getParameter.apply(this, arguments);
             };
             if (typeof WebGL2RenderingContext !== 'undefined') {
                 const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
                 WebGL2RenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) return 'Google Inc. (Intel)';
-                    if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                    if (parameter === 37445) return 'Intel Open Source Technology Center';
+                    if (parameter === 37446) return 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
                     return getParameter2.apply(this, arguments);
                 };
             }
-            // 屏蔽自动化测试特征
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
+
+            // 3. 补齐 Chrome 插件与平台特征
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
             });
-            window.navigator.chrome = { runtime: {} };
+            window.chrome = {
+                app: { isInstalled: false },
+                runtime: {
+                    PlatformOs: { LINUX: 'linux' }
+                }
+            };
         """)
         return browser, context
 
@@ -234,8 +249,31 @@ class Authenticator:
                             if box and box["width"] > 0:
                                 click_x = box["x"] + 30
                                 click_y = box["y"] + box["height"] / 2
-                                logger.info(f"[{self.account.email}] 成功定位 Cloudflare 验证框 (屏幕坐标: x={int(click_x)}, y={int(click_y)})，正在点击复选框...")
-                                await page.mouse.click(click_x, click_y)
+                                logger.info(f"[{self.account.email}] 成功定位 Cloudflare 验证框 (屏幕坐标: x={int(click_x)}, y={int(click_y)})，正在模拟自然轨迹点击复选框...")
+                                # 1. 拟人化自然轨迹平滑滑动 + 物理按压
+                                await page.mouse.move(click_x - 80, click_y - 60)
+                                await asyncio.sleep(0.08)
+                                await page.mouse.move(click_x, click_y, steps=12)
+                                await asyncio.sleep(0.12)
+                                await page.mouse.down()
+                                await asyncio.sleep(0.08)
+                                await page.mouse.up()
+
+                                # 2. 操作系统级硬件鼠标事件下发 (xdotool 双重保险)
+                                try:
+                                    if os.environ.get("DISPLAY"):
+                                        screen_click_x = int(click_x)
+                                        screen_click_y = int(click_y + 80)
+                                        subprocess.run(
+                                            ["xdotool", "mousemove", str(screen_click_x), str(screen_click_y), "click", "1"],
+                                            env=dict(os.environ, DISPLAY=os.environ.get("DISPLAY")),
+                                            timeout=2,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL
+                                        )
+                                except Exception:
+                                    pass
+
                                 clicked_successfully = True
                                 break
                         except Exception as e:
