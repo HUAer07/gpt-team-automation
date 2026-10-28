@@ -33,6 +33,8 @@ class Authenticator:
         proxy_dict = get_playwright_proxy(settings.http_proxy)
         if proxy_dict:
             logger.info(f"浏览器挂载代理: {proxy_dict.get('server')}")
+        else:
+            logger.warning("【注意】未检测到住宅代理！当前正在使用云服务器机房 IP 直连，极易触发 Cloudflare 永不放行的严格机房风控！强烈建议配置住宅代理！")
         
         # 渲染模式智能决策：若具备 DISPLAY (Xvfb虚拟显卡)，采用真实有头仿真模式秒过 Cloudflare
         if os.environ.get("DISPLAY"):
@@ -50,18 +52,35 @@ class Authenticator:
                 "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
+                "--window-size=1280,800",
             ]
         )
         
+        # 指纹一致性：在 Linux 虚拟环境下采用与底层系统一致的 UA，杜绝 UA 与平台 (sec-ch-ua-platform) 矛盾触发风控
         context = await browser.new_context(
             proxy=proxy_dict,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800},
             locale="en-US",
             timezone_id="America/New_York",
         )
         
         await context.add_init_script("""
+            // 屏蔽虚拟显卡 SwiftShader 特征，模拟真实 Intel GPU
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) return 'Google Inc. (Intel)';
+                if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                return getParameter.apply(this, arguments);
+            };
+            if (typeof WebGL2RenderingContext !== 'undefined') {
+                const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) return 'Google Inc. (Intel)';
+                    if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                    return getParameter2.apply(this, arguments);
+                };
+            }
+            // 屏蔽自动化测试特征
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
