@@ -14,7 +14,8 @@ RUN ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    playwright install chrome
 
 COPY . .
 

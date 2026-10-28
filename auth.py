@@ -45,16 +45,22 @@ class Authenticator:
         else:
             is_headless = settings.headless
 
-        browser = await p.chromium.launch(
-            headless=is_headless,
-            args=[
+        launch_kwargs = {
+            "headless": is_headless,
+            "args": [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
                 "--window-size=1280,800",
             ]
-        )
+        }
+        # 优先使用官方 Google Chrome，无缝避开 Chromium 自动化签名风控
+        if os.path.exists("/usr/bin/google-chrome"):
+            launch_kwargs["channel"] = "chrome"
+            logger.info("已切换至 Google Chrome 官方正版浏览器内核，彻底消除开源 Chromium 指纹特征")
+
+        browser = await p.chromium.launch(**launch_kwargs)
         
         # 指纹一致性：在 Linux 虚拟环境下采用与底层系统一致的 UA，杜绝 UA 与平台 (sec-ch-ua-platform) 矛盾触发风控
         context = await browser.new_context(
@@ -99,7 +105,7 @@ class Authenticator:
         return False
 
     async def is_in_cloudflare(self, page: Page) -> tuple[bool, str]:
-        """检测当前页面是否仍受 Cloudflare 拦截或质询"""
+        """检测当前页面是否仍受 Cloudflare 拦截或质询 (支持跨域 Shadow DOM / 独立 Frame 深度探测)"""
         try:
             title = (await page.title()).lower()
             if "just a moment" in title or "cloudflare" in title:
@@ -107,7 +113,15 @@ class Authenticator:
         except Exception:
             pass
 
-        # 检查 Turnstile iframe
+        # 1. 穿透 Shadow DOM：检查所有 Frame 是否包含 Cloudflare Turnstile 质询
+        try:
+            for f in page.frames:
+                if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                    return True, f"Turnstile Frame 质询活动中"
+        except Exception:
+            pass
+
+        # 2. 检查 Turnstile iframe (兼容常规 DOM)
         try:
             cf_iframe = page.locator(
                 'iframe[src*="challenges.cloudflare.com"], '
@@ -120,7 +134,7 @@ class Authenticator:
         except Exception:
             pass
 
-        # 检查特征文本 (Verifying... 或 Verify you are human)
+        # 3. 检查特征文本 (Verifying... 或 Verify you are human)
         try:
             for text_pattern in ["Verifying...", "Verify you are human", "确认您是真人", "正在验证"]:
                 if await page.locator(f'text="{text_pattern}"').first.is_visible(timeout=200):
@@ -193,30 +207,47 @@ class Authenticator:
 
             # 尚未进入 Verifying 且未点击过 (或距离上次点击已超过 45 秒未响应)，触发一次点击
             if not has_clicked or (now - last_click_time > 45):
-                cf_iframe = page.locator(
-                    'iframe[src*="challenges.cloudflare.com"], '
-                    'iframe[src*="turnstile"], '
-                    'iframe[title*="Cloudflare"], '
-                    'iframe[title*="Turnstile"]'
-                ).first
-                try:
-                    if await cf_iframe.is_visible(timeout=500):
-                        box = await cf_iframe.bounding_box()
-                        if box:
-                            logger.info(f"[{self.account.email}] 检测到 Cloudflare 待点击复选框，正在模拟点击启动认证...")
-                            await page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
-                        else:
-                            await cf_iframe.click(timeout=1000)
-                    else:
-                        cf_box = page.frame_locator('iframe[src*="cloudflare"], iframe[src*="turnstile"]').locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
-                        if await cf_box.is_visible(timeout=800):
-                            await cf_box.click(timeout=800)
+                clicked_successfully = False
+                # 方式 1: 穿透 Shadow DOM，遍历所有 frame 捕获 challenges.cloudflare.com 真实屏幕位置
+                for f in page.frames:
+                    if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
+                        try:
+                            el = await f.frame_element()
+                            box = await el.bounding_box()
+                            if box and box["width"] > 0:
+                                click_x = box["x"] + 30
+                                click_y = box["y"] + box["height"] / 2
+                                logger.info(f"[{self.account.email}] 成功定位 Cloudflare 验证框 (屏幕坐标: x={int(click_x)}, y={int(click_y)})，正在点击复选框...")
+                                await page.mouse.click(click_x, click_y)
+                                clicked_successfully = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"Frame 定位异常: {e}")
 
+                # 方式 2: 常规 locator 备用定位
+                if not clicked_successfully:
+                    cf_iframe = page.locator(
+                        'iframe[src*="challenges.cloudflare.com"], '
+                        'iframe[src*="turnstile"], '
+                        'iframe[title*="Cloudflare"], '
+                        'iframe[title*="Turnstile"]'
+                    ).first
+                    try:
+                        if await cf_iframe.is_visible(timeout=500):
+                            box = await cf_iframe.bounding_box()
+                            if box:
+                                await page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
+                                clicked_successfully = True
+                            else:
+                                await cf_iframe.click(timeout=1000)
+                                clicked_successfully = True
+                    except Exception as e:
+                        logger.debug(f"点击 Cloudflare 质询组件异常: {e}")
+
+                if clicked_successfully:
                     has_clicked = True
                     last_click_time = now
-                    logger.info(f"[{self.account.email}] 已点击验证框，等待圆圈转完认证...")
-                except Exception as e:
-                    logger.debug(f"点击 Cloudflare 质询组件异常: {e}")
+                    logger.info(f"[{self.account.email}] 已成功点击验证复选框，等待圆圈转完认证...")
             else:
                 if now - last_log_time >= 8:
                     logger.info(f"[{self.account.email}] Cloudflare 质询等待中 ({reason}，已耗时 {elapsed} 秒)...")
