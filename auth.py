@@ -379,15 +379,18 @@ class Authenticator:
                 await email_input.fill(self.account.email)
                 await asyncio.sleep(0.8)
 
-                # 提交邮箱：单次精准点击 Continue 按钮，避免二次点击取消正在进行中的 OAuth 跳转
+                # 提交邮箱：排除主页底部禁用状态的聊天发送按钮 (data-composer-submit / Send message)
                 continue_btn = page.locator(
-                    'form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")), '
-                    'button:text-is("Continue"), '
-                    'button:text-is("继续")'
+                    'button:text-is("Continue"):not([disabled]):not([aria-disabled="true"]), '
+                    'button:text-is("继续"):not([disabled]):not([aria-disabled="true"]), '
+                    'form button[type="submit"]:not([data-composer-submit]):not([aria-label*="Send"]):not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")):not([disabled]):not([aria-disabled="true"])'
                 ).first
-                if await continue_btn.is_visible(timeout=1500):
-                    await continue_btn.click()
-                else:
+                try:
+                    if await continue_btn.is_visible(timeout=1500):
+                        await continue_btn.click(timeout=5000)
+                    else:
+                        await email_input.press("Enter")
+                except Exception:
                     await email_input.press("Enter")
                 
                 logger.info(f"[{self.account.email}] 已提交邮箱，正在等待密码输入框 (耐心等待跳转，避免重复提交)...")
@@ -432,16 +435,19 @@ class Authenticator:
                 await password_input.fill(self.account.password)
                 await asyncio.sleep(0.5)
 
-                # 提交密码 (优先点击提交按钮，避免与 Enter 发生双重提交触发 Operation timed out)
+                # 提交密码 (排除主页聊天发送按钮，优先点击 Continue/提交按钮，失败则回退 Enter)
                 pwd_submit = page.locator(
-                    'button[name="action"][value="default"], '
-                    'form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")), '
-                    'button:text-is("Continue"), '
-                    'button:text-is("继续")'
+                    'button[name="action"][value="default"]:not([disabled]):not([aria-disabled="true"]), '
+                    'button:text-is("Continue"):not([disabled]):not([aria-disabled="true"]), '
+                    'button:text-is("继续"):not([disabled]):not([aria-disabled="true"]), '
+                    'form button[type="submit"]:not([data-composer-submit]):not([aria-label*="Send"]):not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")):not([disabled]):not([aria-disabled="true"])'
                 ).first
-                if await pwd_submit.is_visible(timeout=1500):
-                    await pwd_submit.click()
-                else:
+                try:
+                    if await pwd_submit.is_visible(timeout=1500):
+                        await pwd_submit.click(timeout=5000)
+                    else:
+                        await password_input.press("Enter")
+                except Exception:
                     await password_input.press("Enter")
                 
                 logger.info(f"[{self.account.email}] 已提交密码，正在监听后续跳转 (主页直通 或 2FA 页面)...")
@@ -453,11 +459,6 @@ class Authenticator:
 
                 while time.time() - start_poll < 120:
                     cur_url = page.url
-                    # A. 成功到达 ChatGPT 主界面
-                    if "chatgpt.com" in cur_url and "auth" not in cur_url:
-                        logger.info(f"[{self.account.email}] 账号已成功进入 ChatGPT 主界面")
-                        login_success = True
-                        break
 
                     # 检查是否有 Cloudflare 拦截
                     is_cf, _ = await self.is_in_cloudflare(page)
@@ -473,10 +474,17 @@ class Authenticator:
                             logger.info(f"[{self.account.email}] 恢复后重新输入密码...")
                             await pwd_box.fill(self.account.password)
                             await asyncio.sleep(0.5)
-                            sub_btn = page.locator('button[name="action"][value="default"], form button[type="submit"]:not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple"))').first
-                            if await sub_btn.is_visible(timeout=1000):
-                                await sub_btn.click()
-                            else:
+                            sub_btn = page.locator(
+                                'button[name="action"][value="default"]:not([disabled]):not([aria-disabled="true"]), '
+                                'button:text-is("Continue"):not([disabled]):not([aria-disabled="true"]), '
+                                'form button[type="submit"]:not([data-composer-submit]):not([aria-label*="Send"]):not(:has-text("Google")):not(:has-text("Microsoft")):not(:has-text("Apple")):not([disabled]):not([aria-disabled="true"])'
+                            ).first
+                            try:
+                                if await sub_btn.is_visible(timeout=1000):
+                                    await sub_btn.click(timeout=5000)
+                                else:
+                                    await pwd_box.press("Enter")
+                            except Exception:
                                 await pwd_box.press("Enter")
                         continue
 
@@ -500,16 +508,43 @@ class Authenticator:
                         await code_input.fill(totp_code)
                         await asyncio.sleep(0.5)
 
-                        code_submit = page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("Verify"), button:has-text("继续")').first
-                        if await code_submit.is_visible(timeout=1500):
-                            await code_submit.click()
-                        else:
+                        code_submit = page.locator(
+                            'button:text-is("Continue"):not([disabled]):not([aria-disabled="true"]), '
+                            'button:has-text("Verify"):not([disabled]):not([aria-disabled="true"]), '
+                            'button:text-is("继续"):not([disabled]):not([aria-disabled="true"]), '
+                            'form button[type="submit"]:not([data-composer-submit]):not([aria-label*="Send"]):not([disabled]):not([aria-disabled="true"])'
+                        ).first
+                        try:
+                            if await code_submit.is_visible(timeout=1500):
+                                await code_submit.click(timeout=5000)
+                            else:
+                                await code_input.press("Enter")
+                        except Exception:
                             await code_input.press("Enter")
 
                         mfa_submitted = True
                         logger.info(f"[{self.account.email}] 2FA 动态码已提交，等待主页跳转...")
                         await asyncio.sleep(2)
                         continue
+
+                    # A. 成功到达 ChatGPT 主界面且已获取到有效 Session Token
+                    if "chatgpt.com" in cur_url and "auth" not in cur_url:
+                        try:
+                            check_sess = await page.evaluate("""
+                                async () => {
+                                    try {
+                                        const r = await fetch('/api/auth/session');
+                                        if (!r.ok) return null;
+                                        return await r.json();
+                                    } catch (e) { return null; }
+                                }
+                            """)
+                            if check_sess and check_sess.get("accessToken"):
+                                logger.info(f"[{self.account.email}] 账号已成功进入 ChatGPT 主界面并拿到有效会话")
+                                login_success = True
+                                break
+                        except Exception:
+                            pass
 
                     await asyncio.sleep(1.5)
 
