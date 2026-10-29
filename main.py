@@ -104,6 +104,9 @@ async def run_pipeline():
                 await child_session.close_if_child()
             except Exception as e_c:
                 logger.error(f"子号 [{child.email}] 登录或入组异常: {e_c}")
+                if child.email.strip().lower() == primary_child.email.strip().lower():
+                    logger.error(f"首选主子号 [{child.email}] 确认入组失败，终止后续转让流程！")
+                    return
             if idx < len(active_children) - 1:
                 await asyncio.sleep(settings.step_delay)
 

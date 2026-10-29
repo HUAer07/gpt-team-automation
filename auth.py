@@ -16,7 +16,7 @@ try:
 except ImportError:
     from playwright.async_api import async_playwright, Browser, BrowserContext, Page
     USING_PATCHRIGHT = False
-from config import AccountConfig, settings, get_playwright_proxy
+from config import AccountConfig, settings, get_playwright_proxy, clean_totp_secret
 
 # 全局常驻 Playwright 引擎、母号常驻浏览器实例池与磁盘会话记录文件
 _GLOBAL_PLAYWRIGHT: Any = None
@@ -138,12 +138,17 @@ class Authenticator:
     def __init__(self, account: AccountConfig, is_master: bool = True):
         self.account = account
         self.is_master = is_master
-        self.totp = pyotp.TOTP(account.totp_secret) if account.totp_secret else None
+        clean_secret = clean_totp_secret(account.totp_secret)
+        self.totp = pyotp.TOTP(clean_secret) if clean_secret else None
         self._last_profile_dir: Optional[Path] = None
 
     def get_totp_code(self) -> str:
         if not self.totp:
-            raise ValueError(f"[{self.account.email}] 未配置有效的 TOTP Secret 密钥")
+            clean_secret = clean_totp_secret(self.account.totp_secret)
+            if clean_secret:
+                self.totp = pyotp.TOTP(clean_secret)
+            else:
+                raise ValueError(f"[{self.account.email}] 未能从 2FA 字段提取到合法的 Base32 密钥 (原始值: {self.account.totp_secret})")
         code = self.totp.now()
         logger.info(f"[{self.account.email}] 生成当前 2FA 验证码: {code}")
         return code

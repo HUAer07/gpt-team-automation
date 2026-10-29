@@ -21,7 +21,7 @@ try:
 except ImportError:
     from playwright.async_api import async_playwright
 
-from config import settings, AccountConfig, CardConfig, parse_accounts_text, parse_account_line, parse_promo_codes
+from config import settings, AccountConfig, CardConfig, parse_accounts_text, parse_account_line, parse_promo_codes, clean_totp_secret
 from auth import Authenticator, AuthSession, get_global_playwright, get_active_browser_page
 from team_client import TeamClient
 from payment import PaymentManager
@@ -391,9 +391,9 @@ async def update_config(payload: ConfigPayload):
 
 @app.post("/api/verify-totp")
 async def verify_totp(payload: TotpVerifyPayload):
-    clean = payload.secret.replace(" ", "").strip()
+    clean = clean_totp_secret(payload.secret)
     if not clean:
-        raise HTTPException(status_code=400, detail="TOTP Secret 不能为空")
+        raise HTTPException(status_code=400, detail="未检测到有效的 Base32 TOTP 密钥")
     try:
         totp = pyotp.TOTP(clean)
         code = totp.now()
@@ -401,6 +401,7 @@ async def verify_totp(payload: TotpVerifyPayload):
         return {
             "valid": True,
             "code": code,
+            "cleaned_secret": clean,
             "remaining_seconds": remaining
         }
     except Exception as e:
@@ -547,6 +548,7 @@ async def run_pipeline_worker():
         state.step_message = f"步骤 3: 子号独立登录并接受邀请 (共 {len(active_children)} 个)"
         await broadcast_event("state_change", {"step": 3, "status": "running", "msg": state.step_message})
         
+        primary_child_ok = False
         for idx, c in enumerate(active_children):
             emit_log("info", f">>> [步骤 3/5] ({idx+1}/{len(active_children)}) 子号 [{c.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
             try:
@@ -559,8 +561,14 @@ async def run_pipeline_worker():
                 else:
                     emit_log("info", f"子号 [{c.email}] 未检测到待确认邀请或已是成员")
                 await c_session.close_if_child()
+                if c.email.strip().lower() == primary_child.email.strip().lower():
+                    primary_child_ok = True
             except Exception as e_c:
                 emit_log("error", f"子号 [{c.email}] 登录或入组异常: {e_c}")
+                if c.email.strip().lower() == primary_child.email.strip().lower():
+                    emit_log("error", f"首选主子号 [{c.email}] 登录/入组失败，终止后续转让流程以防止工作区失控！")
+                    state.status = "error"
+                    return
 
             if idx < len(active_children) - 1:
                 emit_log("info", f"等待 {settings.step_delay} 秒处理下一个子号...")

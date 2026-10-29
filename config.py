@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -56,10 +57,44 @@ def get_httpx_proxy(proxy_str: Optional[str] = None) -> Optional[str]:
         return f"http://{raw}"
     return raw
 
+def clean_totp_secret(raw: Optional[str]) -> str:
+    """智能清洗 TOTP Secret，兼容纯 Base32、2fa.live/akmoz 网址链接、otpauth 协议、空格与破折号"""
+    if not raw:
+        return ""
+    text = str(raw).strip()
+    # 提取 URL 参数或锚点中的秘钥
+    if "otpauth://" in text or "http://" in text or "https://" in text or "/" in text:
+        m_param = re.search(r"[?&]secret=([A-Za-z2-7=]+)", text, re.IGNORECASE)
+        if m_param:
+            text = m_param.group(1)
+        elif "#" in text:
+            hash_part = text.split("#", 1)[1].lstrip("/")
+            hash_part = re.split(r"[?&/]", hash_part)[0]
+            if hash_part:
+                text = hash_part
+        else:
+            path_part = text.rstrip("/").split("/")[-1]
+            if path_part and len(path_part) >= 16:
+                text = path_part
+
+    text = re.sub(r"[\s\-_:=]+", "", text).upper()
+    valid_candidates = re.findall(r"[A-Z2-7]{16,64}", text)
+    if valid_candidates:
+        return max(valid_candidates, key=len)
+    only_b32 = re.sub(r"[^A-Z2-7]", "", text)
+    if len(only_b32) >= 8:
+        return only_b32
+    return text
+
 class AccountConfig(BaseModel):
     email: str
     password: str
     totp_secret: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        if self.totp_secret:
+            self.totp_secret = clean_totp_secret(self.totp_secret)
 
 def parse_account_line(line: str) -> Optional[AccountConfig]:
     """解析单行账号信息，支持常见分隔符: 中文顿号(、)、----、逗号(,)、竖线(|)、Tab、冒号(:)、空格等
@@ -77,7 +112,7 @@ def parse_account_line(line: str) -> Optional[AccountConfig]:
                 return AccountConfig(
                     email=parts[0],
                     password=parts[1],
-                    totp_secret=parts[2].replace(" ", "").upper()
+                    totp_secret=clean_totp_secret(parts[2])
                 )
             elif len(parts) == 2:
                 return AccountConfig(
@@ -92,7 +127,7 @@ def parse_account_line(line: str) -> Optional[AccountConfig]:
         return AccountConfig(
             email=parts[0].strip(),
             password=parts[1].strip(),
-            totp_secret=parts[2].strip().replace(" ", "").upper()
+            totp_secret=clean_totp_secret(parts[2])
         )
     elif len(parts) == 2:
         return AccountConfig(
@@ -107,7 +142,7 @@ def parse_account_line(line: str) -> Optional[AccountConfig]:
         return AccountConfig(
             email=parts[0].strip(),
             password=parts[1].strip(),
-            totp_secret=parts[2].strip().replace(" ", "").upper()
+            totp_secret=clean_totp_secret(parts[2])
         )
     return None
 
