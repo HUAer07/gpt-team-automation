@@ -346,7 +346,7 @@ class Authenticator:
 
         # 3. 检查特征文本 (Verifying... 或 Verify you are human)
         try:
-            for text_pattern in ["Verifying...", "Verify you are human", "确认您是真人", "正在验证"]:
+            for text_pattern in ["Verifying...", "Verify you are human", "Performing security verification", "确认您是真人", "正在验证"]:
                 if await page.locator(f'text="{text_pattern}"').first.is_visible(timeout=200):
                     return True, f"质询提示文本: '{text_pattern}'"
         except Exception:
@@ -360,46 +360,25 @@ class Authenticator:
         - 准确定位 Turnstile 质询状态
         - 仅在呈现复选框且未处于验证中时点击一次 (绝对禁止二次重复点击打断)
         - 耐心等待后台加密证明与网络交互完成
-        - 严格以目标表单元素就绪或标题彻底改变为放行标志
+        - 严格以 is_in_cloudflare 确认质询解除为放行标志
         """
         start_time = time.time()
         has_clicked = False
         last_log_time = 0
-        consecutive_passed_checks = 0
 
         logger.info(f"[{self.account.email}] 正在介入 Cloudflare 质询检测与穿透处理...")
 
         while time.time() - start_time < max_wait:
-            # 1. 快速检查：如果邮箱输入框、密码框或登录按钮已出现，说明已经完全穿透放行！
-            try:
-                target_elem = page.locator(
-                    'input[name="username"], input[type="email"], input[id="email-input"], '
-                    'input[name="password"], button[data-testid="login-button"]'
-                ).first
-                if await target_elem.is_visible(timeout=300):
-                    logger.info(f"[{self.account.email}] 目标登录表单元素已呈现，Cloudflare 质询彻底放行通过！")
-                    return True
-            except Exception:
-                pass
-
-            # 2. 检查页面标题：只有标题不再是 'just a moment' 且非空，且连续确认 3 次才算解除
-            try:
-                curr_title = (await page.title()).lower()
-                if curr_title and "just a moment" not in curr_title and "cloudflare" not in curr_title:
-                    consecutive_passed_checks += 1
-                    if consecutive_passed_checks >= 3:
-                        logger.info(f"[{self.account.email}] 页面标题已正常恢复 ('{curr_title}')，Cloudflare 质询放行！")
-                        return True
-                else:
-                    consecutive_passed_checks = 0
-            except Exception:
-                consecutive_passed_checks = 0
-
             is_cf, reason = await self.is_in_cloudflare(page)
             now = time.time()
             elapsed = int(now - start_time)
 
-            # 检查当前是否处于 "Verifying..." 旋转计算中 (穿透 Frame 探测)
+            # 1. 质询已完全消失放行
+            if not is_cf:
+                logger.info(f"[{self.account.email}] Cloudflare 质询已解除放行通过！")
+                return True
+
+            # 2. 检查当前是否处于 "Verifying..." 旋转计算中 (穿透 Frame 探测)
             is_verifying = False
             try:
                 for f in page.frames:
@@ -424,7 +403,7 @@ class Authenticator:
                 await asyncio.sleep(2)
                 continue
 
-            # 给 Turnstile 预留前 3 秒自动无感放行时间 (Patchright + 持久化 Profile 下通常无需点击即可自动放行)
+            # 给 Turnstile 预留前 3 秒自动无感放行时间
             if elapsed < 3:
                 await asyncio.sleep(1)
                 continue
@@ -436,20 +415,33 @@ class Authenticator:
                 for f in page.frames:
                     if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
                         try:
+                            # 优先定位 frame 内部复选框
+                            cb = f.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label, #cf-stage').first
+                            if await cb.is_visible(timeout=300):
+                                box = await cb.bounding_box()
+                                if box and box["width"] > 0:
+                                    click_x = box["x"] + box["width"] / 2
+                                    click_y = box["y"] + box["height"] / 2
+                                    logger.info(f"[{self.account.email}] 定位到 Turnstile 内部复选框 (坐标: x={int(click_x)}, y={int(click_y)})，正在模拟自然点击...")
+                                    await page.mouse.move(click_x - 40, click_y - 30)
+                                    await asyncio.sleep(0.08)
+                                    await page.mouse.move(click_x, click_y, steps=10)
+                                    await asyncio.sleep(0.1)
+                                    await page.mouse.click(click_x, click_y)
+                                    clicked_successfully = True
+                                    break
+
                             el = await f.frame_element()
                             box = await el.bounding_box()
                             if box and box["width"] > 0:
                                 click_x = box["x"] + 30
                                 click_y = box["y"] + box["height"] / 2
                                 logger.info(f"[{self.account.email}] 成功定位 Cloudflare 验证框 (屏幕坐标: x={int(click_x)}, y={int(click_y)})，正在模拟自然轨迹单次点击复选框...")
-                                # 拟人化自然轨迹平滑滑动 + 单次物理按压 (避免与 xdotool 同时触发导致二次点击打断验证)
                                 await page.mouse.move(click_x - 80, click_y - 60)
                                 await asyncio.sleep(0.08)
                                 await page.mouse.move(click_x, click_y, steps=12)
                                 await asyncio.sleep(0.12)
-                                await page.mouse.down()
-                                await asyncio.sleep(0.08)
-                                await page.mouse.up()
+                                await page.mouse.click(click_x, click_y)
 
                                 clicked_successfully = True
                                 break
@@ -787,6 +779,40 @@ class Authenticator:
                         logger.info(f"[{self.account.email}] 2FA 动态码已提交，等待主页跳转...")
                         await asyncio.sleep(2)
                         continue
+
+                    # 检查是否停留在 auth.openai.com/workspace 组织/空间选择页面
+                    if "workspace" in cur_url and "chatgpt.com" not in cur_url:
+                        is_cf, _ = await self.is_in_cloudflare(page)
+                        if is_cf:
+                            await self.handle_cloudflare(page, max_wait=60)
+                            continue
+
+                        logger.info(f"[{self.account.email}] 当前位于工作空间选择页面 (URL: {cur_url})，正在自动选择进入...")
+                        # 查找工作区按钮或 Continue 按钮或首个选项
+                        ws_btn = page.locator(
+                            'button:has-text("Team"), [data-testid*="workspace"]:has-text("Team"), '
+                            'button:has-text("Personal"), [data-testid*="workspace"]:has-text("Personal"), '
+                            'button:has-text("Continue"), button:text-is("继续"), '
+                            'button[type="submit"], [role="button"]'
+                        ).first
+                        try:
+                            if await ws_btn.is_visible(timeout=1500):
+                                await ws_btn.click()
+                                await asyncio.sleep(2)
+                                continue
+                        except Exception:
+                            pass
+
+                        # 若已持有会话 Token，直接导航至主页
+                        try:
+                            cookies = await context.cookies()
+                            if any(c.get("name") == "__Secure-next-auth.session-token" for c in cookies):
+                                logger.info(f"[{self.account.email}] 检测到已持有会话 Token，直接导航至 ChatGPT 主页...")
+                                await page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=20000)
+                                await asyncio.sleep(2)
+                                continue
+                        except Exception:
+                            pass
 
                     # A. 成功到达 ChatGPT 主界面且已获取到有效 Session Token
                     if "chatgpt.com" in cur_url and "auth" not in cur_url:
