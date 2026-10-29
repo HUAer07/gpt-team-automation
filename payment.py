@@ -230,46 +230,6 @@ class PaymentManager:
             "overrideCountry": override_country,
         }
 
-        # 若配置了独立【提链代理】且与【常用代理】不同，优先通过提链代理免登录克隆会话提链，确保锁区优惠码 100% 匹配出口 IP
-        if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw and self.session.context:
-            logger.info("🔗 正在通过独立【提链代理】通道免登录克隆母号 Cookie 提取锁区支付长链...")
-            temp_browser = None
-            try:
-                p = await get_global_playwright()
-                pw_proxy = get_playwright_proxy(checkout_proxy_raw)
-                temp_browser = await p.chromium.launch(
-                    channel="chrome",
-                    headless=True,
-                    proxy=pw_proxy,
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
-                )
-                temp_ctx = await temp_browser.new_context()
-                cookies = await self.session.context.cookies()
-                if cookies:
-                    await temp_ctx.add_cookies(cookies)
-                temp_page = await temp_ctx.new_page()
-                await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=35000)
-                await asyncio.sleep(1.5)
-                res_proxy = await temp_page.evaluate(eval_js, eval_args)
-                if res_proxy and res_proxy.get("ok") and res_proxy.get("url"):
-                    url = res_proxy["url"]
-                    logger.success(
-                        f"🎯 成功通过独立【提链代理】提取 3 席位支付长链 "
-                        f"(地区: {res_proxy.get('country')}/{res_proxy.get('currency')}, "
-                        f"优惠码生效: {res_proxy.get('usedPromo')}): {url}"
-                    )
-                    return url
-                else:
-                    logger.warning(f"独立【提链代理】通道返回告警 ({res_proxy.get('error') if res_proxy else '无响应'})，回退母号常驻窗口重试...")
-            except Exception as e:
-                logger.warning(f"独立【提链代理】通道异常 ({e})，回退母号常驻窗口提链...")
-            finally:
-                if temp_browser:
-                    try:
-                        await temp_browser.close()
-                    except Exception:
-                        pass
-
         if self.session.page and not self.session.page.is_closed():
             page = self.session.page
             try:
@@ -278,7 +238,7 @@ class PaymentManager:
                     await asyncio.sleep(1.5)
 
                 logger.info(
-                    f"正在通过母号常驻浏览器内联接口创建 Team 结账长链 "
+                    f"正在通过母号常驻浏览器(提链代理通道)内联接口创建 3 席位 Team 结账长链 "
                     f"(空间名: {ws_name}, 优惠码: {clean_promo or '无'})..."
                 )
 
@@ -287,7 +247,7 @@ class PaymentManager:
                 if result and result.get("ok") and result.get("url"):
                     url = result["url"]
                     logger.success(
-                        f"成功通过母号常驻浏览器提取支付长链 "
+                        f"🎯 成功通过【提链代理】提取 3 席位支付长链 "
                         f"(地区: {result.get('country')}/{result.get('currency')}, "
                         f"优惠码生效: {result.get('usedPromo')}): {url}"
                     )

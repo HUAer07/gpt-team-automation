@@ -22,6 +22,7 @@ from config import AccountConfig, settings, get_playwright_proxy
 _GLOBAL_PLAYWRIGHT: Any = None
 _MASTER_SESSIONS: Dict[str, "AuthSession"] = {}
 _MASTER_CONTEXTS: Dict[str, BrowserContext] = {}
+_MASTER_PROXIES: Dict[str, str] = {}
 _MASTER_CACHE_FILE = Path(__file__).parent / "browser_profiles" / "master_sessions.json"
 
 
@@ -120,10 +121,17 @@ class Authenticator:
         logger.info(f"[{self.account.email}] 生成当前 2FA 验证码: {code}")
         return code
 
+    def _get_target_proxy_str(self) -> Tuple[str, str]:
+        """母号优先挂载【提链代理】(以便在浏览器内直接提取锁区优惠长链)，子号挂载【常用代理】"""
+        if self.is_master and (settings.checkout_proxy or "").strip():
+            return settings.checkout_proxy.strip(), "提链代理"
+        return (settings.http_proxy or "").strip(), "常用代理"
+
     async def create_stealth_context(self, p) -> Tuple[BrowserContext, BrowserContext]:
-        proxy_dict = get_playwright_proxy(settings.http_proxy)
+        active_proxy_str, proxy_label = self._get_target_proxy_str()
+        proxy_dict = get_playwright_proxy(active_proxy_str)
         if proxy_dict:
-            logger.info(f"浏览器挂载代理: {proxy_dict.get('server')}")
+            logger.info(f"浏览器挂载【{proxy_label}】: {proxy_dict.get('server')} ({proxy_dict.get('username', '无认证')})")
         else:
             logger.warning("【注意】未检测到住宅代理！当前正在使用云服务器机房 IP 直连，极易触发 Cloudflare 永不放行的严格机房风控！强烈建议配置住宅代理！")
 
@@ -142,15 +150,24 @@ class Authenticator:
                     pass
             user_data_dir.mkdir(parents=True, exist_ok=True)
 
-            # 如果内存中已经有该母号打开的浏览器 Context，直接复用，绝不二次启动新浏览器
+            # 如果内存中已经有该母号打开的浏览器 Context，且代理未发生变更，直接复用
             if email_key in _MASTER_CONTEXTS:
                 live_ctx = _MASTER_CONTEXTS[email_key]
-                try:
-                    if live_ctx.pages or await live_ctx.new_page():
-                        self._last_profile_dir = user_data_dir
-                        return live_ctx, live_ctx
-                except Exception:
+                if _MASTER_PROXIES.get(email_key) == active_proxy_str:
+                    try:
+                        if live_ctx.pages or await live_ctx.new_page():
+                            self._last_profile_dir = user_data_dir
+                            return live_ctx, live_ctx
+                    except Exception:
+                        _MASTER_CONTEXTS.pop(email_key, None)
+                else:
+                    logger.info(f"检测到母号【{proxy_label}】配置已更新，正在平滑切换代理并保留持久化登录态...")
+                    try:
+                        await live_ctx.close()
+                    except Exception:
+                        pass
                     _MASTER_CONTEXTS.pop(email_key, None)
+                    _MASTER_SESSIONS.pop(email_key, None)
         else:
             user_data_dir = profiles_root / f"child_{profile_hash}"
             if user_data_dir.exists():
@@ -236,6 +253,7 @@ class Authenticator:
 
         if self.is_master:
             _MASTER_CONTEXTS[email_key] = context
+            _MASTER_PROXIES[email_key] = active_proxy_str
             # 若磁盘上已有母号历史登录 Cookie 记录，自动注入恢复
             disk_cache = _load_master_disk_cache(email_key)
             if disk_cache and disk_cache.get("cookies"):
@@ -435,8 +453,9 @@ class Authenticator:
 
         # 1. 母号优先检查是否已在线：只要登录成功过一次，后续直接检测母号在不在，在就直接跳过登录！
         if self.is_master:
+            active_proxy_str, _ = self._get_target_proxy_str()
             logger.info(f"🔍 [母号状态检查] 正在检查母号 [{self.account.email}] 是否已在线...")
-            if email_key in _MASTER_SESSIONS:
+            if email_key in _MASTER_SESSIONS and _MASTER_PROXIES.get(email_key) == active_proxy_str:
                 existing = _MASTER_SESSIONS[email_key]
                 if existing.context and existing.page and not existing.page.is_closed():
                     try:
