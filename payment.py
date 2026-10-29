@@ -17,6 +17,7 @@ except ImportError:
 
 from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
 from auth import AuthSession, get_global_playwright, set_active_browser_page
+from team_client import TeamClient
 
 
 class PaymentManager:
@@ -628,17 +629,78 @@ class PaymentManager:
             logger.info("协议步骤 [4/4]: 正在携带原生 HSW 签名提交 /confirm 协议结算...")
             await submit_btn.click()
 
-            # 6. 等待协议响应结果（同时监控并单次点击可能出现的 hCaptcha 复选框）
+            # 6. 等待协议响应结果（集成 Arkose Labs 拼图检测、Cloudflare Turnstile 自动点击、双轨工作区激活感知与 180s 宽裕超时）
             hcaptcha_clicked = False
-            for _ in range(45):
+            turnstile_clicked = False
+            challenge_alerted = False
+            max_wait_seconds = 180  # 延长至 3 分钟 (180s)，给予充足的人工解题或手机秒付时间
+            team_client = TeamClient(self.session)
+
+            for tick in range(max_wait_seconds):
                 if confirm_future.done():
                     break
-                # 若页面已跳转回 chatgpt.com 则说明支付成功
+
+                # 1. 若页面已跳转回 chatgpt.com 则说明支付成功
                 if "chatgpt.com" in page.url and "checkout" not in page.url:
                     confirm_future.set_result({"ok": True, "success_url": page.url})
                     break
 
-                # 检查是否有弹出可见的 hCaptcha 复选框，仅单次点击避免打断认证旋转
+                # 2. 双轨检测：每隔 4 秒直接向 OpenAI 轮询母号工作区状态
+                # 若用户在手机/外部浏览器完成支付，或当前页面已静默扣款成功，立即感知激活并返回成功！
+                if tick % 4 == 0:
+                    try:
+                        active_workspaces = await team_client.list_workspaces()
+                        if active_workspaces:
+                            logger.success(f"🎉 检测到 Team 工作区已激活: [{active_workspaces[0].get('name', 'Team')}] (外部手机或当前代付完成)！")
+                            if not confirm_future.done():
+                                confirm_future.set_result({"ok": True, "external": True})
+                            break
+                    except Exception:
+                        pass
+
+                # 3. 自动检测并点击 Cloudflare Turnstile 验证框
+                for f in page.frames:
+                    f_url = f.url or ""
+                    if ("challenges.cloudflare.com" in f_url or "turnstile" in f_url) and not turnstile_clicked:
+                        try:
+                            ts_cb = f.locator("input[type='checkbox'], #challenge-stage input, .ctp-checkbox-label, #checkbox").first
+                            if await ts_cb.is_visible(timeout=200):
+                                box = await ts_cb.bounding_box()
+                                if box:
+                                    logger.info("⚡ 检测到 Cloudflare Turnstile 人机验证，正在自动模拟点击...")
+                                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                    turnstile_clicked = True
+                                    await asyncio.sleep(1.5)
+                        except Exception:
+                            pass
+
+                # 4. 检测 Arkose Labs / FunCaptcha 3D 拼图质询 (机房 IP 风控触发)
+                is_arkose = False
+                for f in page.frames:
+                    f_url = f.url or ""
+                    if "arkoselabs.com" in f_url or "funcaptcha" in f_url:
+                        is_arkose = True
+                        break
+
+                if not is_arkose:
+                    try:
+                        modal_cnt = await page.locator("iframe[src*='arkoselabs'], iframe[src*='funcaptcha'], #fc-iframe-wrap, [data-theme='arkose']").count()
+                        if modal_cnt > 0:
+                            is_arkose = True
+                    except Exception:
+                        pass
+
+                if is_arkose and not challenge_alerted:
+                    challenge_alerted = True
+                    logger.warning("=" * 70)
+                    logger.warning("🔔 【检测到 Stripe 弹出 Arkose 人机验证拼图】(云端机房 IP 触发反欺诈风控)")
+                    logger.warning(f"👉 【方案 1 · 强烈推荐·免拼图秒过】: 复制上方支付长链在【手机浏览器 (建议用手机 4G/5G 流量)】打开支付！")
+                    logger.warning("   手机真实移动网络 100% 免除拼图人机直接扣款，支付后系统将自动秒级感知并继续流程！")
+                    logger.warning("👉 【方案 2 · 在线手动拼图】: 在控制台上方【实时浏览器画面】中直接点击两条线交叉重叠的圆圈格子！")
+                    logger.warning(f"   已为您保持窗口活跃并将等待时间延长至 180 秒（在此期间任一途径支付成功均会自动继续）")
+                    logger.warning("=" * 70)
+
+                # 5. 检查是否有弹出可见的 hCaptcha 复选框
                 if not hcaptcha_clicked:
                     for f in page.frames:
                         f_url = f.url or ""
@@ -655,18 +717,18 @@ class PaymentManager:
                                             await asyncio.sleep(0.1)
                                             await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                                             hcaptcha_clicked = True
-                                            logger.info("已点击 [I am human] 复选框，静默等待验证通过或实时画面拼图...")
-                                            await asyncio.sleep(3.0)
+                                            await asyncio.sleep(2.0)
                                             break
                             except Exception:
                                 pass
+
                 await asyncio.sleep(1.0)
 
             if confirm_future.done():
                 res = confirm_future.result()
                 if res.get("ok"):
                     s_url = res.get("success_url")
-                    if s_url and self.session.page and not self.session.page.is_closed():
+                    if s_url and s_url != "external_paid" and self.session.page and not self.session.page.is_closed():
                         try:
                             logger.info("正在通过母号回调访问 success_url 加速工作区即时激活...")
                             await self.session.page.goto(s_url, wait_until="domcontentloaded", timeout=20000)
@@ -675,7 +737,7 @@ class PaymentManager:
                     return True
                 return False
 
-            logger.error("等待 Stripe /confirm 协议响应超时 (35s)")
+            logger.warning("Stripe 页面等待超时 (180s)，可能正在等待外部支付或拼图未完成")
             return False
 
         except Exception as e:

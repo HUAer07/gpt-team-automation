@@ -525,9 +525,9 @@ async def run_pipeline_worker(start_from_step: int = 1):
                 emit_log("info", "检测到已开启【自动代付】，正在通过 Stripe 纯协议直连通道提交信用卡结算...")
                 pay_ok = await pay_mgr.auto_pay_stripe(p, checkout_url, settings.card)
                 if not pay_ok:
-                    emit_log("error", "Stripe 协议代付未通过（详见上方返回码），可更换卡号重试或点击界面长链手动完成支付")
+                    emit_log("warning", "Stripe 代付等待超时或未完成。若弹出拼图人机，推荐直接复制上方长链在手机浏览器(用移动数据4G/5G)中打开支付，手机免拼图秒过，后台将自动感知并继续！")
             else:
-                emit_log("info", "请点击控制台界面上的长链完成支付（或复制后在外部支付），系统已启动状态轮询...")
+                emit_log("info", "请点击控制台界面上的长链完成支付（推荐复制到手机浏览器免人机支付），系统已启动状态轮询...")
 
             # 轮询等待工作区开通生效 (最多轮询 5 分钟)
             emit_log("info", "等待工作区激活中，持续监听状态...")
