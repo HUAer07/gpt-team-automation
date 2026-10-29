@@ -18,7 +18,7 @@ except ImportError:
     from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
-from auth import AuthSession, get_global_playwright, set_active_browser_page
+from auth import AuthSession, get_global_playwright, set_active_browser_page, Authenticator
 from team_client import TeamClient
 
 
@@ -328,7 +328,6 @@ class PaymentManager:
                         if "invalidated oauth token" in err_str.lower():
                             logger.warning("检测到母号 OAuth 会话在提链调用中失效，立即触发母号自动重新登录并恢复会话...")
                             try:
-                                from auth import Authenticator, get_global_playwright
                                 p_temp = await get_global_playwright()
                                 m_auth = Authenticator(settings.master, is_master=True)
                                 new_sess = await m_auth.relogin_master(p_temp)
