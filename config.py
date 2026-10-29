@@ -100,3 +100,7 @@ class Settings(BaseModel):
     card: CardConfig = Field(default_factory=CardConfig)
 
 settings = Settings()
+
+# 清除环境变量中的非标准四段式 HTTP_PROXY，防止 httpx/chromium 读取 os.environ["HTTP_PROXY"] 报 InvalidPort 错误
+for _env_k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+    os.environ.pop(_env_k, None)

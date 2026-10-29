@@ -68,6 +68,33 @@ async def get_global_playwright():
     return _GLOBAL_PLAYWRIGHT
 
 
+_LAST_ACTIVE_PAGE: Optional[Page] = None
+
+
+def set_active_browser_page(page: Optional[Page]):
+    """记录当前正在操作的浏览器 Page，供无 Xvfb 环境（如 macOS 原生模式）实时截图与远程点击使用"""
+    global _LAST_ACTIVE_PAGE
+    _LAST_ACTIVE_PAGE = page
+
+
+def get_active_browser_page() -> Optional[Page]:
+    """获取当前活跃的浏览器 Page（优先返回最新活动页，其次返回母号常驻页）"""
+    global _LAST_ACTIVE_PAGE
+    if _LAST_ACTIVE_PAGE and not _LAST_ACTIVE_PAGE.is_closed():
+        return _LAST_ACTIVE_PAGE
+    for sess in _MASTER_SESSIONS.values():
+        if sess.page and not sess.page.is_closed():
+            return sess.page
+    for ctx in _MASTER_CONTEXTS.values():
+        try:
+            for p in ctx.pages:
+                if not p.is_closed():
+                    return p
+        except Exception:
+            pass
+    return None
+
+
 class AuthSession:
     def __init__(
         self,
@@ -200,10 +227,13 @@ class Authenticator:
             prefs_data.setdefault("autofill", {})["credit_card_enabled"] = False
             prefs_data.setdefault("autofill", {})["profile_enabled"] = False
             prefs_data.setdefault("credentials_enable_service", False)
-            prefs_data.setdefault(" credentials_enable_autosignin", False)
+            prefs_data.setdefault("credentials_enable_autosignin", False)
             prefs_file.write_text(json.dumps(prefs_data, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
+
+        has_xvfb_display = bool(os.environ.get("DISPLAY"))
+        win_w, win_h = (1920, 1080) if has_xvfb_display else (1280, 800)
 
         args = [
             "--no-sandbox",
@@ -213,7 +243,8 @@ class Authenticator:
             "--hide-crash-restore-bubble",
             "--disable-save-password-bubble",
             "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
-            "--window-size=1280,800",
+            f"--window-size={win_w},{win_h}",
+            "--window-position=0,0",
             "--no-first-run",
             "--no-default-browser-check",
             "--password-store=basic",
@@ -222,7 +253,7 @@ class Authenticator:
         # 渲染模式智能决策：
         # 1. 若具备 DISPLAY (Xvfb虚拟显卡)，采用真实有头模式避免 Headless 特征
         # 2. 若需无头运行 (无 DISPLAY 或开启 headless)，严禁使用旧版 headless_shell，改用 Chrome 原生 --headless=new
-        if os.environ.get("DISPLAY"):
+        if has_xvfb_display:
             is_headless = False
             logger.info("已挂载虚拟显卡图形渲染环境 (Xvfb/DISPLAY=:99)，采用真实有头浏览器模式避开 Cloudflare 质询")
         elif settings.headless or sys.platform.startswith("linux"):
@@ -238,7 +269,7 @@ class Authenticator:
             "args": args,
             "ignore_default_args": ["--enable-automation"],
             "proxy": proxy_dict,
-            "viewport": {"width": 1280, "height": 800},
+            "viewport": {"width": win_w, "height": win_h},
             "locale": "en-US",
             "timezone_id": "America/New_York",
         }
@@ -472,6 +503,7 @@ class Authenticator:
                             }
                         """)
                         if sess_data and sess_data.get("accessToken"):
+                            set_active_browser_page(existing.page)
                             existing.access_token = sess_data.get("accessToken", "")
                             existing.user_id = sess_data.get("user", {}).get("id", existing.user_id)
                             existing.cookies = await existing.context.cookies()
@@ -491,6 +523,7 @@ class Authenticator:
 
         browser, context = await self.create_stealth_context(p)
         page: Page = context.pages[0] if context.pages else await context.new_page()
+        set_active_browser_page(page)
         login_completed = False
         already_logged_in = False
 

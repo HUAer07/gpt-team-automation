@@ -16,7 +16,7 @@ except ImportError:
     from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
-from auth import AuthSession, get_global_playwright
+from auth import AuthSession, get_global_playwright, set_active_browser_page
 
 
 class PaymentManager:
@@ -36,7 +36,7 @@ class PaymentManager:
         if not httpx_proxy:
             return fallback_loc
         try:
-            async with httpx.AsyncClient(proxy=httpx_proxy, timeout=10.0) as client:
+            async with httpx.AsyncClient(proxy=httpx_proxy, timeout=10.0, trust_env=False) as client:
                 resp = await client.get("https://www.cloudflare.com/cdn-cgi/trace")
                 if resp.status_code == 200:
                     m = re.search(r"^loc=([A-Z]{2})$", resp.text, re.MULTILINE)
@@ -238,7 +238,7 @@ class PaymentManager:
                     await asyncio.sleep(1.5)
 
                 logger.info(
-                    f"正在通过母号常驻浏览器(提链代理通道)内联接口创建 3 席位 Team 结账长链 "
+                    f"正在通过母号常驻浏览器内联接口创建 3 席位 Team 结账长链 "
                     f"(空间名: {ws_name}, 优惠码: {clean_promo or '无'})..."
                 )
 
@@ -247,15 +247,63 @@ class PaymentManager:
                 if result and result.get("ok") and result.get("url"):
                     url = result["url"]
                     logger.success(
-                        f"🎯 成功通过【提链代理】提取 3 席位支付长链 "
+                        f"🎯 成功提取 3 席位支付长链 "
                         f"(地区: {result.get('country')}/{result.get('currency')}, "
                         f"优惠码生效: {result.get('usedPromo')}): {url}"
                     )
                     return url
                 else:
-                    logger.warning(f"浏览器内联 API 提取长链返回告警: {result.get('error') if result else '无响应'}")
+                    logger.warning(f"常驻浏览器内联 API 提取长链返回告警: {result.get('error') if result else '无响应'}")
             except Exception as e:
                 logger.warning(f"母号浏览器内联 API 提取长链异常: {e}")
+
+        # 若配置了不同于常用代理的【独立提链代理 (checkout_proxy)】，自动克隆母号 Cookie 至提链代理临时通道重试
+        if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw:
+            proxy_dict = get_playwright_proxy(checkout_proxy_raw)
+            if proxy_dict:
+                logger.info(f"🔄 正在将母号 Cookie 免登录克隆至【独立提链代理 ({override_country or '锁区'})】临时通道提取长链...")
+                temp_browser = None
+                temp_ctx = None
+                try:
+                    p = await get_global_playwright()
+                    launch_opts: Dict[str, Any] = {
+                        "headless": False if os.environ.get("DISPLAY") else True,
+                        "proxy": proxy_dict,
+                        "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
+                    }
+                    if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+                        launch_opts["channel"] = "chrome"
+                    temp_browser = await p.chromium.launch(**launch_opts)
+                    temp_ctx = await temp_browser.new_context(locale="en-US")
+                    if self.session.cookies:
+                        await temp_ctx.add_cookies(self.session.cookies)
+                    temp_page = await temp_ctx.new_page()
+                    await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=45000)
+                    await asyncio.sleep(2.0)
+                    result = await temp_page.evaluate(eval_js, eval_args)
+                    if result and result.get("ok") and result.get("url"):
+                        url = result["url"]
+                        logger.success(
+                            f"🎯 成功通过【独立提链代理临时通道】提取 3 席位支付长链 "
+                            f"(地区: {result.get('country')}/{result.get('currency')}, "
+                            f"优惠码生效: {result.get('usedPromo')}): {url}"
+                        )
+                        return url
+                    else:
+                        logger.warning(f"独立提链代理通道返回: {result.get('error') if result else '无响应'}")
+                except Exception as e:
+                    logger.warning(f"独立提链代理临时通道提取异常: {e}")
+                finally:
+                    if temp_ctx:
+                        try:
+                            await temp_ctx.close()
+                        except Exception:
+                            pass
+                    if temp_browser:
+                        try:
+                            await temp_browser.close()
+                        except Exception:
+                            pass
 
         return None
 
@@ -335,257 +383,272 @@ class PaymentManager:
 
     async def auto_pay_stripe(self, p, checkout_url: str, card: CardConfig) -> bool:
         """
-        纯协议执行 Stripe Checkout 结算 (不打开浏览器页面、不触发页面 DOM 弹窗与前端 hCaptcha):
-        1. 解码长链 Hash 提取 pk_live 公钥与 cs_live 会话 ID
-        2. 调用 /v1/payment_pages/{cs_id}/init 初始化账单并获取 init_checksum
-        3. 调用 /v1/payment_pages/{cs_id} 注入优惠码与美国免税州地址 (DE 19801) 计算 0 税费总额
-        4. 调用 /v1/payment_methods 将信用卡三要素与账单地址生成 pm_ 令牌
-        5. 调用 /v1/payment_pages/{cs_id}/confirm 直接完成协议扣款与订阅激活
+        基于真实抓包逆向的 Stripe 协议监控 + 浏览器原生 HSW 签名混合代付引擎：
+        1. 强制挂载【常用代理 (http_proxy)】(美国住宅出口 IP 与美国卡/DE免税州一致，完全隔离锁区提链代理)
+        2. 实时嗅探 /v1/payment_pages/{cs_id}/init、税费核算、/v1/payment_methods 与 /confirm 协议报文
+        3. 由页面原生生成加密 passive_captcha_token (P1_eyJ...)、rv_timestamp 与 m.stripe.com/6 42位签名指纹
+        4. 自动勾选 termsOfServiceConsentCheckbox 并触发原生 custom_checkout_beta=v1 协议提交，秒级捕获银行真实返回码
         """
-        logger.info("⚡ 启动 Stripe 纯协议直连代付引擎 (免浏览器 DOM 渲染)...")
+        logger.info("⚡ 启动 Stripe 协议级混合代付引擎 (原生 HSW 签名 + 实时协议报文监控)...")
         logger.info(f"卡号末尾: {card.card_number[-4:] if len(card.card_number) >= 4 else '****'} | 持卡人: {card.card_name or 'ChatGPT User'}")
 
+        if p is None:
+            p = await get_global_playwright()
+
+        m = re.search(r"(cs_(?:live|test)_[A-Za-z0-9_]+)", checkout_url)
+        cs_id = m.group(1) if m else "cs_live"
+
+        pay_proxy_dict = get_playwright_proxy(settings.http_proxy)
+        if pay_proxy_dict:
+            pay_country = await self._detect_proxy_country(settings.http_proxy)
+            logger.info(f"🌐 Stripe 代付通道已挂载【常用代理】: {pay_proxy_dict.get('server')} (出口国家: {pay_country or 'US'})")
+        else:
+            logger.info("🌐 Stripe 代付通道使用【服务器直连】")
+
+        zero_decimal_currencies = {
+            "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA",
+            "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
+        }
+
+        browser = None
+        ctx = None
+        page = None
+        confirm_future = asyncio.get_running_loop().create_future()
+        logged_tax = False
+
         try:
-            # 1. 解析 cs_live 会话 ID 与 #fragment 中的 pk_live 公钥
-            m = re.search(r"(cs_(?:live|test)_[A-Za-z0-9_]+)", checkout_url)
-            if not m:
-                logger.error(f"无法从长链中解析出 cs_live 会话 ID: {checkout_url}")
-                return False
-            cs_id = m.group(1)
-
-            pk = "pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVAlqCxdxCUvoRh1XWwRacViovU3kLKvpkjh7IqkW00iXQsjo3n"
-            if "#" in checkout_url:
-                try:
-                    frag = urllib.parse.unquote(checkout_url.split("#", 1)[1])
-                    raw = base64.b64decode(frag + "=" * (-len(frag) % 4))
-                    decoded = json.loads("".join(chr(b ^ 5) for b in raw))
-                    if decoded.get("apiKey"):
-                        pk = decoded["apiKey"]
-                except Exception as e:
-                    logger.warning(f"长链 Hash 解码 pk_live 失败，使用默认 OpenAI Live 公钥: {e}")
-
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "Origin": "https://pay.openai.com",
-                "Referer": "https://pay.openai.com/",
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                ),
+            has_xvfb = bool(os.environ.get("DISPLAY"))
+            win_w, win_h = (1920, 1080) if has_xvfb else (1280, 800)
+            launch_opts: Dict[str, Any] = {
+                "headless": False if has_xvfb else settings.headless,
+                "proxy": pay_proxy_dict,
+                "args": [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--disable-save-password-bubble",
+                    "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
+                    f"--window-size={win_w},{win_h}",
+                    "--window-position=0,0",
+                ],
             }
+            if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+                launch_opts["channel"] = "chrome"
 
-            pay_proxy_url = get_httpx_proxy(settings.http_proxy)
-            if pay_proxy_url:
-                pay_country = await self._detect_proxy_country(settings.http_proxy)
-                logger.info(f"🌐 Stripe 协议代付使用【常用代理】通道 (出口国家: {pay_country or '自动'})")
-            else:
-                logger.info("🌐 Stripe 协议代付使用【服务器直连】通道 (未配置常用代理)")
-
-            async def stripe_post(endpoint: str, form_data: Dict[str, Any]) -> httpx.Response:
-                """强制通过【常用代理 (http_proxy)】请求 api.stripe.com，绝不使用锁区提链代理扣款"""
-                if pay_proxy_url:
-                    try:
-                        async with httpx.AsyncClient(proxy=pay_proxy_url, timeout=25.0) as client:
-                            return await client.post(endpoint, data=form_data, headers=headers)
-                    except Exception as proxy_err:
-                        logger.warning(f"常用代理请求 Stripe API 异常 ({proxy_err})，自动切换直连通道...")
-                async with httpx.AsyncClient(timeout=25.0) as client:
-                    return await client.post(endpoint, data=form_data, headers=headers)
-
-            # 2. 初始化支付会话 (/v1/payment_pages/{cs_id}/init)
-            logger.info(f"协议步骤 [1/4]: 初始化 Stripe 会话 ({cs_id[:24]}...)...")
-            init_resp = await stripe_post(
-                f"https://api.stripe.com/v1/payment_pages/{cs_id}/init",
-                {
-                    "key": pk,
-                    "eid": "NA",
-                    "browser_locale": "en-US",
-                    "redirect_type": "stripe_js",
-                },
+            browser = await p.chromium.launch(**launch_opts)
+            ctx = await browser.new_context(
+                viewport={"width": win_w, "height": win_h},
+                locale="en-US",
+                timezone_id="America/New_York",
             )
-            if init_resp.status_code != 200:
-                logger.error(f"Stripe init 失败 (HTTP {init_resp.status_code}): {init_resp.text[:300]}")
-                return False
+            page = await ctx.new_page()
+            set_active_browser_page(page)
 
-            page_state = init_resp.json()
-            init_checksum = page_state.get("init_checksum", "")
-            total_summary = page_state.get("total_summary") or {}
-            consent_collection = page_state.get("consent_collection") or {}
-            customer_email = page_state.get("customer_email") or self.session.email
+            async def on_stripe_response(resp):
+                nonlocal logged_tax
+                u = resp.url
+                if "api.stripe.com/v1/" not in u:
+                    return
+                try:
+                    # 1. 监听 /init
+                    if f"/payment_pages/{cs_id}/init" in u and resp.status == 200:
+                        logger.info(f"协议步骤 [1/4]: Stripe 会话初始化成功 ({cs_id[:24]}...)")
 
-            # 3. 若配置了优惠码且当前账单尚未生效折扣，通过协议补打优惠码
-            clean_promo = (card.promo_code or "").strip()
-            if clean_promo and not total_summary.get("total_discount_amount_aggregate"):
-                logger.info(f"协议步骤 [1.5/4]: 协议注入优惠码 [{clean_promo}]...")
-                promo_resp = await stripe_post(
-                    f"https://api.stripe.com/v1/payment_pages/{cs_id}",
-                    {
-                        "key": pk,
-                        "eid": "NA",
-                        "promotion_code": clean_promo,
-                    },
-                )
-                if promo_resp.status_code == 200:
-                    page_state = promo_resp.json()
-                    total_summary = page_state.get("total_summary") or total_summary
-                    init_checksum = page_state.get("init_checksum") or init_checksum
-                    logger.success(f"协议注入优惠码 [{clean_promo}] 成功！")
-                else:
-                    logger.warning(f"协议注入优惠码返回 HTTP {promo_resp.status_code}: {promo_resp.text[:200]}")
+                    # 2. 监听免税州算税返回 (/v1/payment_pages/{cs_id})
+                    elif u.endswith(f"/payment_pages/{cs_id}") and resp.request.method == "POST" and resp.status == 200:
+                        post_raw = resp.request.post_data or ""
+                        if "tax_region%5Bpostal_code%5D" in post_raw or "tax_region[postal_code]" in post_raw:
+                            data = await resp.json()
+                            ts = data.get("total_summary") or {}
+                            curr = (data.get("currency") or "usd").upper()
+                            div = 1 if curr in zero_decimal_currencies else 100
+                            due = ts.get("due", 0)
+                            sub = ts.get("subtotal", due)
+                            disc = ts.get("total_discount_amount_aggregate", 0)
+                            tax = ts.get("total_tax_exclusive", 0)
+                            logged_tax = True
+                            logger.info(
+                                f"📊 协议步骤 [2/4] 账单核算完成 [{curr}]: "
+                                f"原价={sub/div:.2f} | 折扣=-{disc/div:.2f} | 税费={tax/div:.2f} | 实付={due/div:.2f}"
+                            )
 
-            # 4. 协议提交美国免税州地址计算 0 消费税 (/v1/payment_pages/{cs_id})
+                    # 3. 监听 PaymentMethod 令牌创建 (/v1/payment_methods)
+                    elif "/v1/payment_methods" in u and resp.request.method == "POST":
+                        if resp.status == 200:
+                            pm_data = await resp.json()
+                            pm_id = pm_data.get("id", "")
+                            c_info = pm_data.get("card") or {}
+                            brand = (c_info.get("brand") or "card").upper()
+                            last4 = c_info.get("last4") or card.card_number[-4:]
+                            logger.success(f"协议步骤 [3/4]: 成功生成 PaymentMethod 令牌: {pm_id} ({brand} *{last4})")
+                        else:
+                            err_json = await resp.json()
+                            err = err_json.get("error") or {}
+                            msg = f"[{err.get('code', 'card_error')} / {err.get('decline_code', '')}] {err.get('message', '')}"
+                            logger.error(f"❌ 协议步骤 [3/4] 创建信用卡令牌失败: {msg}")
+                            if not confirm_future.done():
+                                confirm_future.set_result({"ok": False, "reason": msg})
+
+                    # 4. 监听最终扣款确认 (/confirm 或 /verify_challenge)
+                    elif (f"/payment_pages/{cs_id}/confirm" in u or "/verify_challenge" in u) and resp.request.method == "POST":
+                        c_json = await resp.json()
+                        if resp.status >= 400 or c_json.get("error"):
+                            err = c_json.get("error") or {}
+                            code = err.get("code", "declined")
+                            d_code = err.get("decline_code", "")
+                            msg = err.get("message", f"HTTP {resp.status}")
+                            err_str = f"[{code}{f' / {d_code}' if d_code else ''}] {msg}"
+                            logger.error(f"❌ 协议步骤 [4/4] Stripe 扣款被拒: {err_str}")
+                            if not confirm_future.done():
+                                confirm_future.set_result({"ok": False, "reason": err_str})
+                            return
+
+                        c_status = c_json.get("status")
+                        p_status = c_json.get("payment_status")
+                        pi = c_json.get("payment_intent") or c_json
+                        pi_status = pi.get("status")
+                        s_url = c_json.get("success_url") or c_json.get("return_url")
+
+                        if c_status == "complete" or p_status == "paid" or pi_status in ("succeeded", "processing"):
+                            logger.success(
+                                f"🎉 协议步骤 [4/4] Stripe 扣款成功！"
+                                f"(status={c_status}, payment_status={p_status}, pi_status={pi_status})"
+                            )
+                            if not confirm_future.done():
+                                confirm_future.set_result({"ok": True, "success_url": s_url})
+                        elif pi_status == "requires_action":
+                            na = pi.get("next_action") or {}
+                            na_type = na.get("type", "unknown")
+                            sdk_type = (na.get("use_stripe_sdk") or {}).get("type", "")
+                            if sdk_type == "intent_confirmation_challenge" or "captcha" in sdk_type:
+                                logger.info("检测到 Stripe 请求二次 HSW/hCaptcha 挑战确认，正在自动处理...")
+                            else:
+                                logger.warning(f"⚠️ 发卡行要求 3DS / 额外验证 ({na_type}/{sdk_type})")
+                                if not confirm_future.done():
+                                    confirm_future.set_result({"ok": False, "reason": f"requires_action:{na_type}/{sdk_type}"})
+                except Exception as cb_err:
+                    logger.debug(f"解析 Stripe 协议响应包异常: {cb_err}")
+
+            page.on("response", on_stripe_response)
+
+            logger.info("正在加载 Stripe 安全结算上下文并预热 HSW 被动验证令牌...")
+            await page.goto(checkout_url, wait_until="domcontentloaded", timeout=60000)
+
+            card_loc = page.locator("#cardNumber")
+            await card_loc.wait_for(state="visible", timeout=25000)
+            await asyncio.sleep(1.0)
+
+            # 1. 填写邮箱（若为空）
+            email_loc = page.locator("#email")
+            if await email_loc.count() > 0 and await email_loc.is_visible():
+                if not (await email_loc.input_value()):
+                    await email_loc.fill(self.session.email)
+                    await asyncio.sleep(0.3)
+
+            # 2. 填写卡号、有效期、CVC 与持卡人姓名（触发 Stripe 原生 passive_captcha_token 预计算）
+            clean_number = card.card_number.replace(" ", "").replace("-", "").strip()
+            clean_exp = card.card_exp.replace("/", "").replace(" ", "").strip()
+            clean_cvc = card.card_cvc.strip()
+            clean_name = (card.card_name or "ChatGPT User").strip()
+
+            await card_loc.click()
+            await card_loc.type(clean_number, delay=20)
+            await page.locator("#cardExpiry").click()
+            await page.locator("#cardExpiry").type(clean_exp, delay=20)
+            await page.locator("#cardCvc").click()
+            await page.locator("#cardCvc").type(clean_cvc, delay=20)
+            await page.locator("#billingName").fill(clean_name)
+
+            # 3. 切换美国免税州地址 (默认 DE 19801)
             b_country = (card.billing_country or "US").strip()
             b_state = (card.billing_state or "DE").strip()
             b_zip = (card.billing_zip or "19801").strip()
             b_city = (card.billing_city or "Wilmington").strip()
             b_line1 = (card.billing_line1 or "1201 N Orange St").strip()
 
-            logger.info(f"协议步骤 [2/4]: 同步免税州账单地址 ({b_line1}, {b_city}, {b_state} {b_zip})...")
-            tax_resp = await stripe_post(
-                f"https://api.stripe.com/v1/payment_pages/{cs_id}",
-                {
-                    "key": pk,
-                    "eid": "NA",
-                    "tax_region[country]": b_country,
-                    "tax_region[state]": b_state,
-                    "tax_region[postal_code]": b_zip,
-                    "tax_region[city]": b_city,
-                    "tax_region[line1]": b_line1,
-                },
-            )
-            if tax_resp.status_code == 200:
-                page_state = tax_resp.json()
-                total_summary = page_state.get("total_summary") or total_summary
-                init_checksum = page_state.get("init_checksum") or init_checksum
+            logger.info(f"正在同步免税州账单地址 ({b_line1}, {b_city}, {b_state} {b_zip})...")
+            country_loc = page.locator("#billingCountry")
+            if await country_loc.count() > 0 and not (await country_loc.is_disabled()):
+                curr_c = await country_loc.input_value()
+                if curr_c != b_country:
+                    await country_loc.select_option(b_country)
+                    await asyncio.sleep(1.2)
 
-            currency = (page_state.get("currency") or "usd").upper()
-            due_amount = total_summary.get("due", 0)
-            subtotal = total_summary.get("subtotal", due_amount)
-            discount = total_summary.get("total_discount_amount_aggregate", 0)
-            tax_excl = total_summary.get("total_tax_exclusive", 0)
-            tax_incl = total_summary.get("total_tax_inclusive", 0)
-            logger.info(
-                f"📊 账单核算完成 [{currency}]: 原价={subtotal/100:.2f} | "
-                f"折扣=-{discount/100:.2f} | 税费={tax_excl/100:.2f} | 实付={due_amount/100:.2f}"
-            )
+            if await page.locator("#billingAddressLine1").is_visible():
+                await page.locator("#billingAddressLine1").fill(b_line1)
+            if await page.locator("#billingLocality").is_visible():
+                await page.locator("#billingLocality").fill(b_city)
+            if await page.locator("#billingAdministrativeArea").is_visible():
+                await page.locator("#billingAdministrativeArea").select_option(b_state)
+            if await page.locator("#billingPostalCode").is_visible():
+                await page.locator("#billingPostalCode").fill(b_zip)
+            await asyncio.sleep(1.5)
 
-            # 5. 创建 PaymentMethod 令牌 (/v1/payment_methods)
-            clean_number = card.card_number.replace(" ", "").replace("-", "").strip()
-            clean_cvc = card.card_cvc.strip()
-            exp_raw = card.card_exp.replace("/", "").replace(" ", "").strip()
-            exp_month = exp_raw[:2]
-            exp_year = ("20" + exp_raw[2:]) if len(exp_raw) == 4 else exp_raw[2:]
+            # 4. 自动勾选服务条款复选框 (#termsOfServiceConsentCheckbox)
+            tos_loc = page.locator("#termsOfServiceConsentCheckbox")
+            if await tos_loc.count() > 0:
+                if not (await tos_loc.is_checked()):
+                    await tos_loc.check(force=True)
+                    await asyncio.sleep(0.4)
 
-            logger.info("协议步骤 [3/4]: 向 Stripe 网关创建信用卡令牌 (PaymentMethod)...")
-            pm_resp = await stripe_post(
-                "https://api.stripe.com/v1/payment_methods",
-                {
-                    "type": "card",
-                    "card[number]": clean_number,
-                    "card[cvc]": clean_cvc,
-                    "card[exp_month]": exp_month,
-                    "card[exp_year]": exp_year,
-                    "billing_details[name]": (card.card_name or "ChatGPT User").strip(),
-                    "billing_details[email]": customer_email,
-                    "billing_details[address][country]": b_country,
-                    "billing_details[address][line1]": b_line1,
-                    "billing_details[address][city]": b_city,
-                    "billing_details[address][state]": b_state,
-                    "billing_details[address][postal_code]": b_zip,
-                    "payment_user_agent": "stripe.js/c264a67020; stripe-js-v3/c264a67020; checkout",
-                    "pasted_fields": "number",
-                    "time_on_page": str(random.randint(15000, 32000)),
-                    "guid": str(uuid.uuid4()),
-                    "muid": str(uuid.uuid4()),
-                    "sid": str(uuid.uuid4()),
-                    "key": pk,
-                    "_stripe_version": "2024-06-20",
-                },
-            )
-            if pm_resp.status_code != 200:
-                try:
-                    err = pm_resp.json().get("error", {})
-                    logger.error(
-                        f"❌ 创建信用卡令牌失败: [{err.get('code')} / {err.get('decline_code', '')}] "
-                        f"{err.get('message', pm_resp.text[:200])}"
-                    )
-                except Exception:
-                    logger.error(f"❌ 创建信用卡令牌失败 (HTTP {pm_resp.status_code}): {pm_resp.text[:200]}")
+            # 5. 点击提交按钮触发 /v1/payment_methods 与 /confirm 协议请求
+            submit_btn = page.locator('button[type="submit"], .SubmitButton').first
+            logger.info("协议步骤 [4/4]: 正在携带原生 HSW 签名提交 /confirm 协议结算...")
+            await submit_btn.click()
+
+            # 6. 等待协议响应结果（同时自动监控可能弹出的 hCaptcha 复选框）
+            for _ in range(35):
+                if confirm_future.done():
+                    break
+                # 若页面已跳转回 chatgpt.com 则说明支付成功
+                if "chatgpt.com" in page.url and "checkout" not in page.url:
+                    confirm_future.set_result({"ok": True, "success_url": page.url})
+                    break
+                # 检查是否有可见的 hCaptcha 复选框并自动单次点击
+                for f in page.frames:
+                    if "hcaptcha.com" in f.url and "checkbox" in f.url:
+                        try:
+                            cb = f.locator("#checkbox")
+                            if await cb.is_visible(timeout=200):
+                                if (await cb.get_attribute("aria-checked")) != "true":
+                                    box = await cb.bounding_box()
+                                    if box:
+                                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                        await asyncio.sleep(2.0)
+                        except Exception:
+                            pass
+                await asyncio.sleep(1.0)
+
+            if confirm_future.done():
+                res = confirm_future.result()
+                if res.get("ok"):
+                    s_url = res.get("success_url")
+                    if s_url and self.session.page and not self.session.page.is_closed():
+                        try:
+                            logger.info("正在通过母号回调访问 success_url 加速工作区即时激活...")
+                            await self.session.page.goto(s_url, wait_until="domcontentloaded", timeout=20000)
+                        except Exception:
+                            pass
+                    return True
                 return False
 
-            pm_json = pm_resp.json()
-            pm_id = pm_json.get("id")
-            card_info = pm_json.get("card") or {}
-            logger.success(
-                f"成功生成 PaymentMethod: {pm_id} "
-                f"({(card_info.get('brand') or 'card').upper()} *{card_info.get('last4', clean_number[-4:])})"
-            )
-
-            # 6. 提交协议扣款确认 (/v1/payment_pages/{cs_id}/confirm)
-            logger.info("协议步骤 [4/4]: 提交 Stripe 协议结算确认 (/confirm)...")
-            confirm_payload: Dict[str, Any] = {
-                "eid": "NA",
-                "payment_method": pm_id,
-                "expected_amount": str(due_amount),
-                "last_displayed_line_item_group_details[subtotal]": str(subtotal),
-                "last_displayed_line_item_group_details[total_exclusive_tax]": str(tax_excl),
-                "last_displayed_line_item_group_details[total_inclusive_tax]": str(tax_incl),
-                "last_displayed_line_item_group_details[total_discount_amount]": str(discount),
-                "last_displayed_line_item_group_details[shipping_rate_amount]": "0",
-                "expected_payment_method_type": "card",
-                "key": pk,
-                "init_checksum": init_checksum,
-            }
-            if consent_collection.get("terms_of_service") == "required":
-                confirm_payload["consent[terms_of_service]"] = "accepted"
-
-            conf_resp = await stripe_post(
-                f"https://api.stripe.com/v1/payment_pages/{cs_id}/confirm",
-                confirm_payload,
-            )
-
-            if conf_resp.status_code != 200:
-                try:
-                    err = conf_resp.json().get("error", {})
-                    code = err.get("code", "unknown")
-                    d_code = err.get("decline_code", "")
-                    msg = err.get("message", conf_resp.text[:200])
-                    logger.error(f"❌ Stripe 协议扣款被拒: [{code}{f' / {d_code}' if d_code else ''}] {msg}")
-                except Exception:
-                    logger.error(f"❌ Stripe 协议扣款失败 (HTTP {conf_resp.status_code}): {conf_resp.text[:300]}")
-                return False
-
-            conf_json = conf_resp.json()
-            c_status = conf_json.get("status")
-            p_status = conf_json.get("payment_status")
-            pi = conf_json.get("payment_intent") or {}
-            pi_status = pi.get("status")
-            success_url = conf_json.get("success_url") or conf_json.get("return_url")
-
-            if c_status == "complete" or p_status == "paid" or pi_status in ("succeeded", "processing"):
-                logger.success(f"🎉 Stripe 协议支付扣款成功！(status={c_status}, payment_status={p_status})")
-                if success_url and self.session.page and not self.session.page.is_closed():
-                    try:
-                        logger.info("正在通过母号回调访问 success_url 加速工作区即时激活...")
-                        await self.session.page.goto(success_url, wait_until="domcontentloaded", timeout=20000)
-                    except Exception:
-                        pass
-                return True
-
-            if pi_status == "requires_action":
-                next_action = pi.get("next_action") or {}
-                na_type = next_action.get("type", "unknown")
-                sdk_type = (next_action.get("use_stripe_sdk") or {}).get("type", "")
-                logger.warning(
-                    f"⚠️ 银行或风控要求额外交互验证 (status=requires_action, type={na_type}"
-                    f"{f'/{sdk_type}' if sdk_type else ''})，请点击界面长链完成验证"
-                )
-                return False
-
-            logger.warning(f"Stripe confirm 返回未完成状态: status={c_status}, payment_status={p_status}, pi_status={pi_status}")
+            logger.error("等待 Stripe /confirm 协议响应超时 (35s)")
             return False
 
         except Exception as e:
-            logger.error(f"Stripe 协议代付执行异常: {e}")
+            logger.error(f"Stripe 代付引擎执行异常: {e}")
             return False
+        finally:
+            if self.session.page and not self.session.page.is_closed():
+                set_active_browser_page(self.session.page)
+            if ctx:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass

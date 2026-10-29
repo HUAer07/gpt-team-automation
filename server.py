@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import shutil
 import asyncio
 import subprocess
 from typing import Optional, List, Dict, Any
@@ -21,7 +22,7 @@ except ImportError:
     from playwright.async_api import async_playwright
 
 from config import settings, AccountConfig, CardConfig
-from auth import Authenticator, AuthSession, get_global_playwright
+from auth import Authenticator, AuthSession, get_global_playwright, get_active_browser_page
 from team_client import TeamClient
 from payment import PaymentManager
 
@@ -44,15 +45,36 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/api/screenshot")
 async def get_live_screenshot():
-    """实时捕获 Xvfb 虚拟显卡当前屏幕并返回图片 (无缓存)"""
+    """实时捕获当前浏览器画面 (Linux Xvfb 优先使用 scrot，macOS/本地自动回退 Playwright 原生截图)"""
     screen_path = STATIC_DIR / "live_screen.png"
-    try:
-        subprocess.run(["scrot", "-o", str(screen_path)], env=dict(os.environ, DISPLAY=":99"), timeout=3)
-        if screen_path.exists():
-            return FileResponse(str(screen_path), media_type="image/png", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-    except Exception as e:
-        logger.error(f"捕获实时屏幕截图失败: {e}")
-    raise HTTPException(status_code=500, detail="Failed to capture screenshot")
+    headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
+    # 1. Linux 容器 Xvfb 环境优先使用 scrot 截取完整屏幕
+    if os.environ.get("DISPLAY") and shutil.which("scrot"):
+        try:
+            res = subprocess.run(
+                ["scrot", "-o", str(screen_path)],
+                env=dict(os.environ, DISPLAY=os.environ.get("DISPLAY", ":99")),
+                timeout=3,
+            )
+            if res.returncode == 0 and screen_path.exists():
+                return FileResponse(str(screen_path), media_type="image/png", headers=headers)
+        except Exception as e:
+            logger.debug(f"scrot 截图未就绪，尝试回退 Playwright 原生截图: {e}")
+
+    # 2. macOS / 本地无 Xvfb 环境自动回退 Playwright Page 原生截图
+    active_page = get_active_browser_page()
+    if active_page:
+        try:
+            await active_page.screenshot(path=str(screen_path))
+            if screen_path.exists():
+                return FileResponse(str(screen_path), media_type="image/png", headers=headers)
+        except Exception as e:
+            logger.error(f"Playwright 实时页面截图失败: {e}")
+
+    if screen_path.exists():
+        return FileResponse(str(screen_path), media_type="image/png", headers=headers)
+    raise HTTPException(status_code=500, detail="当前暂无活跃浏览器画面，请先启动任务或提取长链")
 
 class ScreenActionPayload(BaseModel):
     action: str  # "click" or "drag"
@@ -63,25 +85,61 @@ class ScreenActionPayload(BaseModel):
 
 @app.post("/api/screen/action")
 async def post_screen_action(payload: ScreenActionPayload):
-    """在 Xvfb (:99) 实时画面上执行远程鼠标点击或拖拽 (用于手动辅助过验证码/弹窗)"""
-    env = dict(os.environ, DISPLAY=":99")
-    try:
-        x = max(0, min(1920, int(payload.x)))
-        y = max(0, min(1080, int(payload.y)))
-        if payload.action == "drag" and payload.to_x is not None and payload.to_y is not None:
-            tx = max(0, min(1920, int(payload.to_x)))
-            ty = max(0, min(1080, int(payload.to_y)))
-            cmd = (
-                f"xdotool mousemove {x} {y} mousedown 1 "
-                f"mousemove --sync {tx} {ty} sleep 0.15 mouseup 1"
-            )
-            subprocess.run(["bash", "-c", cmd], env=env, timeout=5)
-        else:
-            subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1"], env=env, timeout=3)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"远程屏幕交互执行失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """在实时画面上执行远程鼠标点击或拖拽 (兼容 Xvfb xdotool 与 macOS Playwright 原生鼠标事件)"""
+    x = max(0, min(1920, int(payload.x)))
+    y = max(0, min(1080, int(payload.y)))
+
+    # 1. Linux 容器 Xvfb 环境使用 xdotool
+    if os.environ.get("DISPLAY") and shutil.which("xdotool"):
+        env = dict(os.environ, DISPLAY=os.environ.get("DISPLAY", ":99"))
+        try:
+            if payload.action == "drag" and payload.to_x is not None and payload.to_y is not None:
+                tx = max(0, min(1920, int(payload.to_x)))
+                ty = max(0, min(1080, int(payload.to_y)))
+                subprocess.run(
+                    [
+                        "xdotool",
+                        "mousemove", str(x), str(y),
+                        "mousedown", "1",
+                        "mousemove", "--sync", str(tx), str(ty),
+                        "sleep", "0.15",
+                        "mouseup", "1",
+                    ],
+                    env=env,
+                    timeout=5,
+                    check=True,
+                )
+            else:
+                subprocess.run(
+                    ["xdotool", "mousemove", str(x), str(y), "click", "1"],
+                    env=env,
+                    timeout=3,
+                    check=True,
+                )
+            return {"status": "ok", "driver": "xdotool"}
+        except Exception as e:
+            logger.debug(f"xdotool 交互异常，回退 Playwright mouse: {e}")
+
+    # 2. macOS / 本地环境回退 Playwright Page.mouse
+    active_page = get_active_browser_page()
+    if active_page:
+        try:
+            if payload.action == "drag" and payload.to_x is not None and payload.to_y is not None:
+                tx = max(0, min(1920, int(payload.to_x)))
+                ty = max(0, min(1080, int(payload.to_y)))
+                await active_page.mouse.move(x, y)
+                await active_page.mouse.down()
+                await active_page.mouse.move(tx, ty, steps=12)
+                await asyncio.sleep(0.15)
+                await active_page.mouse.up()
+            else:
+                await active_page.mouse.click(x, y)
+            return {"status": "ok", "driver": "playwright"}
+        except Exception as e:
+            logger.error(f"Playwright 远程鼠标交互失败: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    raise HTTPException(status_code=400, detail="当前无活跃浏览器页面可供交互")
 
 # 全局任务状态管理
 class PipelineState:

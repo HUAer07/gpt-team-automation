@@ -101,7 +101,7 @@ class TeamClient:
             headers["chatgpt-account-id"] = workspace_id
             headers["OpenAI-Organization"] = workspace_id
         proxy_url = get_httpx_proxy(settings.http_proxy)
-        async with httpx.AsyncClient(base_url=self.base_url, headers=headers, proxy=proxy_url, timeout=30.0) as client:
+        async with httpx.AsyncClient(base_url=self.base_url, headers=headers, proxy=proxy_url, timeout=30.0, trust_env=False) as client:
             resp = await client.request(method.upper(), path, json=json_body)
             try:
                 data = resp.json()

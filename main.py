@@ -7,7 +7,7 @@ except ImportError:
     from playwright.async_api import async_playwright
 
 from config import settings
-from auth import Authenticator, AuthSession
+from auth import Authenticator, AuthSession, get_global_playwright
 from team_client import TeamClient
 from payment import PaymentManager
 
@@ -24,7 +24,8 @@ async def run_pipeline():
         logger.error("请先在 .env 中配置子号邮箱与密码！")
         sys.exit(1)
 
-    async with async_playwright() as p:
+    p = await get_global_playwright()
+    if True:
         # ---------------------------------------------------------
         # 步骤 1: 登录母号并获取/开通工作区
         # ---------------------------------------------------------
