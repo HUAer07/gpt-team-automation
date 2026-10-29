@@ -8,13 +8,25 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 def get_playwright_proxy(proxy_str: Optional[str] = None) -> Optional[Dict[str, str]]:
-    """将各种格式的代理字符串 (如 host:port:user:pass, http://user:pass@host:port 等)
-    自动转换为 Playwright 标准 proxy 字典"""
+    """将各种格式的代理字符串 (如 host:port:user:pass, http://user:pass@host:port, socks5://... 等)
+    自动转换为 Playwright 标准 proxy 字典。针对带账密的 SOCKS5 代理，自动拉起本地透明桥接器避开 Chromium 限制。"""
     if proxy_str is None and "settings" in globals():
         proxy_str = settings.http_proxy
     if not proxy_str or not proxy_str.strip():
         return None
     raw = proxy_str.strip()
+    if "#" in raw:
+        raw = raw.split("#")[0].strip()
+
+    # 自动识别并桥接带账密的 SOCKS5 代理
+    try:
+        from socks5_bridge import get_socks5_http_bridge
+        bridge = get_socks5_http_bridge(raw)
+        if bridge:
+            return {"server": bridge}
+    except Exception:
+        pass
+
     parts = raw.split(":")
     
     # 支持常见住宅代理格式 host:port:username:password
@@ -49,6 +61,18 @@ def get_httpx_proxy(proxy_str: Optional[str] = None) -> Optional[str]:
     if not proxy_str or not proxy_str.strip():
         return None
     raw = proxy_str.strip()
+    if "#" in raw:
+        raw = raw.split("#")[0].strip()
+
+    # 自动识别并桥接带账密的 SOCKS5 代理
+    try:
+        from socks5_bridge import get_socks5_http_bridge
+        bridge = get_socks5_http_bridge(raw)
+        if bridge:
+            return bridge
+    except Exception:
+        pass
+
     parts = raw.split(":")
     if len(parts) == 4 and not raw.startswith(("http://", "https://", "socks5://")):
         host, port, username, password = parts[0], parts[1], parts[2], parts[3]
