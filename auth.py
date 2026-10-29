@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import shutil
 import asyncio
 import time
@@ -17,9 +18,45 @@ except ImportError:
     USING_PATCHRIGHT = False
 from config import AccountConfig, settings, get_playwright_proxy
 
-# 全局常驻 Playwright 引擎与母号长连接会话池 (保证母号登录后绝不关闭/切换浏览器)
+# 全局常驻 Playwright 引擎、母号常驻浏览器实例池与磁盘会话记录文件
 _GLOBAL_PLAYWRIGHT: Any = None
 _MASTER_SESSIONS: Dict[str, "AuthSession"] = {}
+_MASTER_CONTEXTS: Dict[str, BrowserContext] = {}
+_MASTER_CACHE_FILE = Path(__file__).parent / "browser_profiles" / "master_sessions.json"
+
+
+def _save_master_disk_cache(email: str, session_token: str, access_token: str, user_id: str, cookies: list):
+    """将母号登录凭据与 Cookie 持久化记录到磁盘，即使容器重启也能自动恢复"""
+    try:
+        _MASTER_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _MASTER_CACHE_FILE.exists():
+            try:
+                data = json.loads(_MASTER_CACHE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data[email.strip().lower()] = {
+            "email": email,
+            "session_token": session_token,
+            "access_token": access_token,
+            "user_id": user_id,
+            "cookies": cookies,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _MASTER_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"写入母号磁盘会话缓存失败: {e}")
+
+
+def _load_master_disk_cache(email: str) -> Optional[Dict[str, Any]]:
+    """读取磁盘上记录的母号历史登录凭据与 Cookie"""
+    try:
+        if not _MASTER_CACHE_FILE.exists():
+            return None
+        data = json.loads(_MASTER_CACHE_FILE.read_text(encoding="utf-8"))
+        return data.get(email.strip().lower())
+    except Exception:
+        return None
 
 
 async def get_global_playwright():
@@ -91,12 +128,31 @@ class Authenticator:
             logger.warning("【注意】未检测到住宅代理！当前正在使用云服务器机房 IP 直连，极易触发 Cloudflare 永不放行的严格机房风控！强烈建议配置住宅代理！")
 
         # 母号使用固定持久化目录长期驻留；子号每次轮换使用全新独立目录
-        profile_hash = hashlib.md5(self.account.email.strip().lower().encode()).hexdigest()[:12]
+        email_key = self.account.email.strip().lower()
+        profile_hash = hashlib.md5(email_key.encode()).hexdigest()[:12]
+        profiles_root = Path(__file__).parent / "browser_profiles"
         if self.is_master:
-            user_data_dir = Path(__file__).parent / "browser_profiles" / f"master_{profile_hash}"
+            user_data_dir = profiles_root / f"master_{profile_hash}"
+            old_profile_dir = profiles_root / f"profile_{profile_hash}"
+            # 如果之前在旧目录名下登录过且新目录尚未登录，自动迁移旧目录登录态
+            if old_profile_dir.exists() and not user_data_dir.exists():
+                try:
+                    shutil.copytree(old_profile_dir, user_data_dir, symlinks=True, ignore_dangling_symlinks=True)
+                except Exception:
+                    pass
             user_data_dir.mkdir(parents=True, exist_ok=True)
+
+            # 如果内存中已经有该母号打开的浏览器 Context，直接复用，绝不二次启动新浏览器
+            if email_key in _MASTER_CONTEXTS:
+                live_ctx = _MASTER_CONTEXTS[email_key]
+                try:
+                    if live_ctx.pages or await live_ctx.new_page():
+                        self._last_profile_dir = user_data_dir
+                        return live_ctx, live_ctx
+                except Exception:
+                    _MASTER_CONTEXTS.pop(email_key, None)
         else:
-            user_data_dir = Path(__file__).parent / "browser_profiles" / f"child_{profile_hash}"
+            user_data_dir = profiles_root / f"child_{profile_hash}"
             if user_data_dir.exists():
                 shutil.rmtree(user_data_dir, ignore_errors=True)
             user_data_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +210,16 @@ class Authenticator:
             logger.info(f"已启用官方 Google Chrome 正版内核 ({engine_tag}) 与持久化 Profile ({user_data_dir.name})")
 
         context = await p.chromium.launch_persistent_context(**launch_kwargs)
+
+        if self.is_master:
+            _MASTER_CONTEXTS[email_key] = context
+            # 若磁盘上已有母号历史登录 Cookie 记录，自动注入恢复
+            disk_cache = _load_master_disk_cache(email_key)
+            if disk_cache and disk_cache.get("cookies"):
+                try:
+                    await context.add_cookies(disk_cache["cookies"])
+                except Exception:
+                    pass
 
         if not USING_PATCHRIGHT:
             # 仅在未安装 patchright 时补充清除 webdriver 属性；不篡改原生 WebGL 原型链以防触发 Function.toString 风控
@@ -344,79 +410,91 @@ class Authenticator:
 
         email_key = self.account.email.strip().lower()
 
-        # 母号长连接复用：如果母号浏览器已经打开且页面存活，直接复用同一个浏览器窗口，绝不换浏览器！
-        if self.is_master and email_key in _MASTER_SESSIONS:
-            existing = _MASTER_SESSIONS[email_key]
-            if existing.context and existing.page and not existing.page.is_closed():
-                try:
-                    logger.info(f"[{self.account.email}] 检测到母号常驻浏览器在线，正在校验会话状态 (不切换浏览器)...")
-                    if "chatgpt.com" not in existing.page.url:
-                        await existing.page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
-                        await asyncio.sleep(1.5)
-                    sess_data = await existing.page.evaluate("""
-                        async () => {
-                            try {
-                                const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
-                                if (!r.ok) return null;
-                                return await r.json();
-                            } catch (e) { return null; }
-                        }
-                    """)
-                    if sess_data and sess_data.get("accessToken"):
-                        existing.access_token = sess_data.get("accessToken", "")
-                        existing.user_id = sess_data.get("user", {}).get("id", existing.user_id)
-                        existing.cookies = await existing.context.cookies()
-                        logger.success(f"♻️ [{self.account.email}] 母号常驻浏览器会话有效，直接原地复用！")
-                        return existing
-                except Exception as e:
-                    logger.warning(f"[{self.account.email}] 常驻浏览器会话刷新异常，准备重新恢复: {e}")
+        # 1. 母号优先检查是否已在线：只要登录成功过一次，后续直接检测母号在不在，在就直接跳过登录！
+        if self.is_master:
+            logger.info(f"🔍 [母号状态检查] 正在检查母号 [{self.account.email}] 是否已在线...")
+            if email_key in _MASTER_SESSIONS:
+                existing = _MASTER_SESSIONS[email_key]
+                if existing.context and existing.page and not existing.page.is_closed():
                     try:
-                        await existing.context.close()
-                    except Exception:
-                        pass
-                    _MASTER_SESSIONS.pop(email_key, None)
+                        if "chatgpt.com" not in existing.page.url or "/auth" in existing.page.url:
+                            await existing.page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
+                            await asyncio.sleep(1.5)
+                        sess_data = await existing.page.evaluate("""
+                            async () => {
+                                try {
+                                    const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+                                    if (!r.ok) return null;
+                                    return await r.json();
+                                } catch (e) { return null; }
+                            }
+                        """)
+                        if sess_data and sess_data.get("accessToken"):
+                            existing.access_token = sess_data.get("accessToken", "")
+                            existing.user_id = sess_data.get("user", {}).get("id", existing.user_id)
+                            existing.cookies = await existing.context.cookies()
+                            _save_master_disk_cache(
+                                self.account.email,
+                                existing.session_token,
+                                existing.access_token,
+                                existing.user_id,
+                                existing.cookies,
+                            )
+                            logger.success(f"✅ [母号在线] 检测到母号 [{self.account.email}] 处于已登录状态，直接复用现有会话（跳过登录）！")
+                            return existing
+                    except Exception as e:
+                        logger.warning(f"[{self.account.email}] 常驻窗口会话检查异常，尝试通过持久化 Profile 恢复: {e}")
+        else:
+            logger.info(f"[{self.account.email}] (子号轮换) 启动独立浏览器准备登录...")
 
-        role_tag = "母号(常驻)" if self.is_master else "子号(临时轮换)"
-        logger.info(f"[{self.account.email}] ({role_tag}) 开始自动化登录流程...")
         browser, context = await self.create_stealth_context(p)
         page: Page = context.pages[0] if context.pages else await context.new_page()
         login_completed = False
+        already_logged_in = False
 
         try:
             # 允许最多 2 次全流程重试以应对偶发代理网络超时
             for attempt in range(1, 3):
-                logger.info(f"正在加载 ChatGPT 登录入口 (代理连接中，第 {attempt} 次尝试)...")
+                if self.is_master:
+                    logger.info(f"正在打开 ChatGPT 页面验证母号在线状态 (第 {attempt} 次连接)...")
+                else:
+                    logger.info(f"正在加载子号 ChatGPT 登录页面 (第 {attempt} 次连接)...")
+
                 try:
-                    await page.goto("https://chatgpt.com", wait_until="commit", timeout=90000)
-                    await asyncio.sleep(2)
+                    if "chatgpt.com" not in page.url or attempt > 1:
+                        await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=90000)
+                    await asyncio.sleep(1.5)
                 except Exception as e:
-                    logger.warning(f"打开登录入口延迟较高: {e}")
+                    logger.warning(f"打开页面延迟较高: {e}")
 
-                # 检查持久化 Profile 是否已经保有有效登录会话 (若已登录则直接免验证复用)
-                try:
-                    is_cf_now, _ = await self.is_in_cloudflare(page)
-                    if not is_cf_now and "chatgpt.com" in page.url and "auth" not in page.url:
-                        cached_session = await page.evaluate("""
-                            async () => {
-                                try {
-                                    const res = await fetch('/api/auth/session');
-                                    if (!res.ok) return null;
-                                    return await res.json();
-                                } catch (e) { return null; }
-                            }
-                        """)
-                        if cached_session and cached_session.get("accessToken"):
-                            logger.success(f"[{self.account.email}] 检测到持久化 Profile 会话仍然有效，直接免登录与免 CF 验证复用！")
-                            break
-                except Exception:
-                    pass
-
-                # 动态等待：一边穿透 Cloudflare，一边等待登录表单或邮箱输入框就绪 (最多等待 120 秒)
+                # 动态等待：持续检测是否已存在有效登录态 (优先复用已记录的母号会话)，仅在确认未登录时才点击 Log in
                 start_load = time.time()
                 email_ready = False
+                logged_offline_notice = False
                 email_input = page.locator('input[type="email"], input[name="email"], input#email-input, input[name="username"]').first
 
                 while time.time() - start_load < 120:
+                    elapsed_load = time.time() - start_load
+                    # 0. 核心检测：每轮优先查询 /api/auth/session，只要已有 accessToken 说明母号/账号在线，立即跳过登录！
+                    try:
+                        is_cf_now, _ = await self.is_in_cloudflare(page)
+                        if not is_cf_now and "chatgpt.com" in page.url and "auth" not in page.url:
+                            cached_session = await page.evaluate("""
+                                async () => {
+                                    try {
+                                        const res = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+                                        if (!res.ok) return null;
+                                        return await res.json();
+                                    } catch (e) { return null; }
+                                }
+                            """)
+                            if cached_session and cached_session.get("accessToken"):
+                                logger.success(f"✅ [{self.account.email}] 检测到账号已处于登录状态，直接复用已记录会话（无需重新登录）！")
+                                already_logged_in = True
+                                break
+                    except Exception:
+                        pass
+
                     # 1. 检查是否有 Cookie 接受弹窗 (Accept all / 全部接受)
                     cookie_btn = page.locator('button:text-is("Accept all"), button:text-is("全部接受")').first
                     try:
@@ -426,10 +504,18 @@ class Authenticator:
                     except Exception:
                         pass
 
-                    # 2. 如果页面有 "Log in" / "登录" 初始按钮，点击进入邮箱登录弹窗
+                    # 若母号已有历史登录记录，前 6 秒优先等待页面会话恢复，不急于点击 Log in
+                    if self.is_master and _load_master_disk_cache(email_key) and elapsed_load < 6.0:
+                        await asyncio.sleep(1.5)
+                        continue
+
+                    # 2. 如果页面有 "Log in" / "登录" 初始按钮，说明当前确实未登录，点击进入邮箱登录弹窗
                     login_btn = page.locator('button[data-testid="login-button"], a:has-text("Log in"), button:text-is("Log in"), button:text-is("登录")').first
                     try:
                         if await login_btn.is_visible(timeout=600):
+                            if self.is_master and not logged_offline_notice:
+                                logger.warning(f"⚠️ [母号未在线] 检测到母号 [{self.account.email}] 当前未登录，开始执行首次登录并记录...")
+                                logged_offline_notice = True
                             logger.info("点击主页【Log in / 登录】按钮唤出登录面板...")
                             await login_btn.click()
                             await asyncio.sleep(2)
@@ -439,6 +525,9 @@ class Authenticator:
                     # 3. 检查邮箱输入框是否已经呈现 (若就绪则直接进入下一步)
                     try:
                         if await email_input.is_visible(timeout=800):
+                            if self.is_master and not logged_offline_notice:
+                                logger.warning(f"⚠️ [母号未在线] 检测到母号 [{self.account.email}] 当前未登录，开始执行首次登录并记录...")
+                                logged_offline_notice = True
                             logger.info(f"[{self.account.email}] 登录面板加载完成，邮箱输入框就绪！")
                             email_ready = True
                             break
@@ -455,6 +544,9 @@ class Authenticator:
                     # 5. 检查是否有 Try again 按钮
                     await self.check_and_recover_error(page)
                     await asyncio.sleep(1.5)
+
+                if already_logged_in:
+                    break
 
                 if not email_ready:
                     try:
@@ -687,7 +779,14 @@ class Authenticator:
             login_completed = True
             if self.is_master:
                 _MASTER_SESSIONS[email_key] = session_obj
-                logger.info(f"📌 [{self.account.email}] 母号浏览器已锁定为长期常驻模式 (后续步骤及下次运行直接复用该浏览器)")
+                _save_master_disk_cache(
+                    self.account.email,
+                    session_token,
+                    access_token,
+                    user_id,
+                    cookies,
+                )
+                logger.info(f"💾 [{self.account.email}] 母号登录状态已持久化记录 (后续运行将直接检测在线状态并跳过登录)")
             return session_obj
 
         finally:
