@@ -159,7 +159,7 @@ class Authenticator:
 
         self._last_profile_dir = user_data_dir
 
-        # 清理容器重启或异常退出遗留的 Chrome 锁文件，防止 Profile in use 报错
+        # 清理容器重启或异常退出遗留的 Chrome 锁文件，并关闭 Chrome 存卡/恢复气泡弹窗
         for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
             lock_file = user_data_dir / lock_name
             if lock_file.exists() or lock_file.is_symlink():
@@ -168,11 +168,34 @@ class Authenticator:
                 except Exception:
                     pass
 
+        try:
+            default_dir = user_data_dir / "Default"
+            default_dir.mkdir(parents=True, exist_ok=True)
+            prefs_file = default_dir / "Preferences"
+            prefs_data = {}
+            if prefs_file.exists():
+                try:
+                    prefs_data = json.loads(prefs_file.read_text(encoding="utf-8"))
+                except Exception:
+                    prefs_data = {}
+            prefs_data.setdefault("profile", {})["exit_type"] = "Normal"
+            prefs_data.setdefault("profile", {})["exited_cleanly"] = True
+            prefs_data.setdefault("autofill", {})["credit_card_enabled"] = False
+            prefs_data.setdefault("autofill", {})["profile_enabled"] = False
+            prefs_data.setdefault("credentials_enable_service", False)
+            prefs_data.setdefault(" credentials_enable_autosignin", False)
+            prefs_file.write_text(json.dumps(prefs_data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
         args = [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
+            "--hide-crash-restore-bubble",
+            "--disable-save-password-bubble",
+            "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
             "--window-size=1280,800",
             "--no-first-run",
             "--no-default-browser-check",

@@ -317,6 +317,11 @@
           </div>
 
           <div class="flex items-center space-x-2.5 w-full sm:w-auto">
+            <!-- 实时画面按钮 -->
+            <button onclick="toggleLiveScreen()" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
+              <i class="fa-solid fa-desktop"></i>
+              <span>实时浏览器画面</span>
+            </button>
             <!-- 仅提取长链按钮 -->
             <button onclick="extractLinkOnly()" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
               <i class="fa-solid fa-link"></i>
@@ -392,6 +397,28 @@
             <i class="fa-solid fa-arrow-up-right-from-square"></i>
             <span>打开支付</span>
           </a>
+        </div>
+      </div>
+
+      <!-- 实时浏览器画面卡片 (默认折叠，支持鼠标点击与拖拽过验证码) -->
+      <div id="live-screen-card" class="hidden bg-dark-900 border border-emerald-500/30 rounded-2xl overflow-hidden shadow-xl">
+        <div class="bg-dark-950/90 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
+          <div class="flex items-center space-x-2 text-xs">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span class="font-bold text-emerald-400">实时浏览器画面 (Xvfb :99)</span>
+            <span class="text-slate-400 text-[11px]">支持直接在画面上鼠标点击或按住拖拽拼图</span>
+          </div>
+          <div class="flex items-center space-x-2 text-xs">
+            <button onclick="refreshLiveScreen()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition">
+              <i class="fa-solid fa-rotate mr-1"></i>刷新
+            </button>
+            <button onclick="toggleLiveScreen()" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+        <div class="relative bg-black flex items-center justify-center select-none overflow-hidden">
+          <img id="live-screen-img" src="" alt="Live Browser Screen" draggable="false" class="w-full h-auto cursor-crosshair block" />
         </div>
       </div>
 
@@ -763,6 +790,68 @@
       div.innerText = text;
       return div.innerHTML;
     }
+
+    let liveScreenTimer = null;
+    let dragStartPos = null;
+
+    function toggleLiveScreen() {
+      const card = document.getElementById('live-screen-card');
+      if (card.classList.contains('hidden')) {
+        card.classList.remove('hidden');
+        refreshLiveScreen();
+        liveScreenTimer = setInterval(refreshLiveScreen, 1500);
+      } else {
+        card.classList.add('hidden');
+        if (liveScreenTimer) {
+          clearInterval(liveScreenTimer);
+          liveScreenTimer = null;
+        }
+      }
+    }
+
+    function refreshLiveScreen() {
+      const img = document.getElementById('live-screen-img');
+      if (!img) return;
+      img.src = '/api/screenshot?t=' + Date.now();
+    }
+
+    function getScreenCoords(img, clientX, clientY) {
+      const rect = img.getBoundingClientRect();
+      const natW = img.naturalWidth || 1920;
+      const natH = img.naturalHeight || 1080;
+      const x = Math.round(((clientX - rect.left) / rect.width) * natW);
+      const y = Math.round(((clientY - rect.top) / rect.height) * natH);
+      return { x, y };
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      const img = document.getElementById('live-screen-img');
+      if (!img) return;
+      img.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        dragStartPos = getScreenCoords(img, e.clientX, e.clientY);
+      });
+      img.addEventListener('mouseup', async (e) => {
+        e.preventDefault();
+        if (!dragStartPos) return;
+        const endPos = getScreenCoords(img, e.clientX, e.clientY);
+        const dist = Math.hypot(endPos.x - dragStartPos.x, endPos.y - dragStartPos.y);
+        const payload = dist > 12
+          ? { action: 'drag', x: dragStartPos.x, y: dragStartPos.y, to_x: endPos.x, to_y: endPos.y }
+          : { action: 'click', x: endPos.x, y: endPos.y };
+        dragStartPos = null;
+        try {
+          await fetch('/api/screen/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          setTimeout(refreshLiveScreen, 350);
+        } catch (err) {
+          console.error('Screen action error:', err);
+        }
+      });
+    });
   </script>
 </body>
 </html>

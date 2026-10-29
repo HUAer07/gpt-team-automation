@@ -527,27 +527,64 @@ class PaymentManager:
 
             await asyncio.sleep(1.0)
 
-            # 9. 点击提交支付/订阅按钮
+            # 9. 点击提交支付/订阅按钮 (先滚动到可视区并确保焦点激活，防止被 Chrome 原生“保存卡片”气泡吞掉首次点击)
             submit_btn = page.locator(
                 'button.SubmitButton, button[data-testid="hosted-payment-submit-button"], '
                 'button[type="submit"]:has-text("Subscribe"), button[type="submit"]:has-text("Start trial"), '
                 'button[type="submit"]:has-text("Pay"), button[type="submit"]:has-text("订阅")'
             ).first
             await submit_btn.wait_for(state="visible", timeout=10000)
+            try:
+                await submit_btn.scroll_into_view_if_needed()
+            except Exception:
+                pass
             logger.info("点击提交 Stripe 支付/订阅按钮...")
             await submit_btn.click()
+            await asyncio.sleep(0.4)
+            try:
+                # 若首次点击仅关闭了浏览器保存卡片气泡并使按钮获得焦点，补发一次点击/回车确保表单真正提交
+                is_processing = await submit_btn.get_attribute("aria-busy") == "true" or "processing" in ((await submit_btn.get_attribute("class")) or "").lower()
+                if not is_processing and await submit_btn.is_enabled():
+                    await submit_btn.click()
+            except Exception:
+                pass
 
             # 10. 智能轮询等待支付完成跳转或捕获拒付/3DS原因 (最多等待 60 秒)
             logger.info("等待 Stripe 支付结算与回调结果...")
             start_wait = asyncio.get_running_loop().time()
             last_err_text = ""
+            reclicked = False
+            hcaptcha_clicked = False
 
-            while asyncio.get_running_loop().time() - start_wait < 60:
+            while asyncio.get_running_loop().time() - start_wait < 120:
                 cur_url = page.url
                 if ("chatgpt.com" in cur_url and "/checkout/" not in cur_url and "pay.openai.com" not in cur_url) or "success" in cur_url:
                     logger.success("🎉 Stripe 支付完成，页面已成功跳回 ChatGPT！")
                     pay_succeeded = True
                     return True
+
+                # 检测是否弹出 Stripe hCaptcha ("One more step before you're done / I am human") 验证框
+                if not hcaptcha_clicked:
+                    for frame in page.frames:
+                        f_url = (frame.url or "").lower()
+                        if "hcaptcha.com" in f_url and ("checkbox" in f_url or "frame=checkbox" in f_url or "#frame=checkbox" in f_url):
+                            try:
+                                cb = frame.locator('#checkbox, [role="checkbox"]').first
+                                if await cb.is_visible():
+                                    is_checked = await cb.get_attribute("aria-checked")
+                                    if is_checked != "true":
+                                        logger.info("检测到 Stripe hCaptcha 人机验证框，正在自动点击勾选 [I am human]...")
+                                        box = await cb.bounding_box()
+                                        if box:
+                                            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=12)
+                                            await asyncio.sleep(0.15)
+                                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                        else:
+                                            await cb.click(force=True)
+                                        hcaptcha_clicked = True
+                                        await asyncio.sleep(2.5)
+                            except Exception:
+                                pass
 
                 # 检测页面是否弹出银行卡拒付或校验报错提示
                 err_loc = page.locator(
@@ -562,6 +599,19 @@ class PaymentManager:
                             logger.warning(f"Stripe 页面提示信息: {err_text}")
                 except Exception:
                     pass
+
+                # 若 5 秒后按钮仍处于未提交的初始可点状态且无报错，自动补点一次提交
+                elapsed_pay = asyncio.get_running_loop().time() - start_wait
+                if elapsed_pay > 5.0 and not reclicked and not last_err_text:
+                    try:
+                        btn_cls = (await submit_btn.get_attribute("class")) or ""
+                        if await submit_btn.is_visible() and await submit_btn.is_enabled() and "processing" not in btn_cls.lower():
+                            logger.info("检测到订阅按钮仍处于待点击状态，自动补发提交点击...")
+                            await submit_btn.click(force=True)
+                            await submit_btn.press("Enter")
+                            reclicked = True
+                    except Exception:
+                        pass
 
                 await asyncio.sleep(2.0)
 

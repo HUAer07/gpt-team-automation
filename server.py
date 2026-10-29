@@ -47,12 +47,41 @@ async def get_live_screenshot():
     """实时捕获 Xvfb 虚拟显卡当前屏幕并返回图片 (无缓存)"""
     screen_path = STATIC_DIR / "live_screen.png"
     try:
-        subprocess.run(["scrot", str(screen_path)], env=dict(os.environ, DISPLAY=":99"), timeout=3)
+        subprocess.run(["scrot", "-o", str(screen_path)], env=dict(os.environ, DISPLAY=":99"), timeout=3)
         if screen_path.exists():
             return FileResponse(str(screen_path), media_type="image/png", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     except Exception as e:
         logger.error(f"捕获实时屏幕截图失败: {e}")
     raise HTTPException(status_code=500, detail="Failed to capture screenshot")
+
+class ScreenActionPayload(BaseModel):
+    action: str  # "click" or "drag"
+    x: int
+    y: int
+    to_x: Optional[int] = None
+    to_y: Optional[int] = None
+
+@app.post("/api/screen/action")
+async def post_screen_action(payload: ScreenActionPayload):
+    """在 Xvfb (:99) 实时画面上执行远程鼠标点击或拖拽 (用于手动辅助过验证码/弹窗)"""
+    env = dict(os.environ, DISPLAY=":99")
+    try:
+        x = max(0, min(1920, int(payload.x)))
+        y = max(0, min(1080, int(payload.y)))
+        if payload.action == "drag" and payload.to_x is not None and payload.to_y is not None:
+            tx = max(0, min(1920, int(payload.to_x)))
+            ty = max(0, min(1080, int(payload.to_y)))
+            cmd = (
+                f"xdotool mousemove {x} {y} mousedown 1 "
+                f"mousemove --sync {tx} {ty} sleep 0.15 mouseup 1"
+            )
+            subprocess.run(["bash", "-c", cmd], env=env, timeout=5)
+        else:
+            subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1"], env=env, timeout=3)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"远程屏幕交互执行失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 全局任务状态管理
 class PipelineState:
