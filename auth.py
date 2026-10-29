@@ -59,6 +59,16 @@ def _load_master_disk_cache(email: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+def _clear_master_disk_cache(email: str):
+    """清除母号磁盘持久化缓存"""
+    try:
+        if _MASTER_CACHE_FILE.exists():
+            data = json.loads(_MASTER_CACHE_FILE.read_text(encoding="utf-8"))
+            data.pop(email.strip().lower(), None)
+            _MASTER_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 async def get_global_playwright():
     """获取全局常驻 Playwright 实例，避免任务结束时自动销毁母号浏览器"""
@@ -525,7 +535,7 @@ class Authenticator:
         """强制对母号进行重新登录并更新会话缓存"""
         email_key = self.account.email.strip().lower()
         _MASTER_SESSIONS.pop(email_key, None)
-        _MASTER_DISK_CACHE.pop(email_key, None)
+        _clear_master_disk_cache(email_key)
         return await self.login(p=p, force_relogin=True)
 
     async def login(self, p=None, force_relogin: bool = False) -> AuthSession:
@@ -569,7 +579,7 @@ class Authenticator:
                             reason = health.get("reason", "unknown")
                             logger.warning(f"⚠️ [母号会话失效] 检测到母号在线状态已失效 (原因: {reason})，清除旧会话并立即启动自动重新登录...")
                             _MASTER_SESSIONS.pop(email_key, None)
-                            _MASTER_DISK_CACHE.pop(email_key, None)
+                            _clear_master_disk_cache(email_key)
 
                             # 若页面停留在 "Your session has expired" 弹窗，自动点击其 Log in 按钮进入登录页
                             expired_btn = existing.page.locator('button:has-text("Log in"), [role="dialog"] button:has-text("Log in")').first
