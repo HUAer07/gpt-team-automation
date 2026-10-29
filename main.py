@@ -1,7 +1,10 @@
 import asyncio
 import sys
 from loguru import logger
-from playwright.async_api import async_playwright
+try:
+    from patchright.async_api import async_playwright
+except ImportError:
+    from playwright.async_api import async_playwright
 
 from config import settings
 from auth import Authenticator, AuthSession

@@ -13,6 +13,10 @@ __pycache__/
 *.pyd
 .pytest_cache/
 *.log
+browser_profiles/
+static/live_screen.png
+static/cf_timeout.png
+static/error_last_page.png
 
 # 系统与开发工具
 .DS_Store

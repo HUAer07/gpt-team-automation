@@ -5,7 +5,10 @@ import re
 from typing import Optional, Dict, Any, Tuple
 from loguru import logger
 import httpx
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+try:
+    from patchright.async_api import Browser, BrowserContext, Page, async_playwright
+except ImportError:
+    from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
 from auth import AuthSession
@@ -76,18 +79,32 @@ class PaymentManager:
         logger.info("启动浏览器无缝拦截提取 Stripe 支付长链...")
         proxy_dict = get_playwright_proxy(settings.http_proxy)
 
-        browser = await p.chromium.launch(
-            headless=settings.headless,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
+        args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1280,800",
+        ]
+        if os.environ.get("DISPLAY"):
+            is_headless = False
+        elif settings.headless or sys.platform.startswith("linux"):
+            is_headless = False
+            args.append("--headless=new")
+        else:
+            is_headless = False
+
+        launch_kwargs = {
+            "headless": is_headless,
+            "args": args,
+            "ignore_default_args": ["--enable-automation"],
+        }
+        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+            launch_kwargs["channel"] = "chrome"
+
+        browser = await p.chromium.launch(**launch_kwargs)
 
         context = await browser.new_context(
             proxy=proxy_dict,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800},
             locale="en-US",
             timezone_id="America/New_York",
@@ -169,25 +186,32 @@ class PaymentManager:
         logger.info(f"卡号末尾: {card.card_number[-4:] if len(card.card_number) >= 4 else '****'} | 持卡人: {card.card_name}")
 
         proxy_dict = get_playwright_proxy(settings.http_proxy)
+        args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1280,900",
+        ]
         if os.environ.get("DISPLAY"):
             is_headless = False
-        elif sys.platform.startswith("linux"):
-            is_headless = True
+        elif settings.headless or sys.platform.startswith("linux"):
+            is_headless = False
+            args.append("--headless=new")
         else:
-            is_headless = settings.headless
+            is_headless = False
 
-        browser = await p.chromium.launch(
-            headless=is_headless,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
+        launch_kwargs = {
+            "headless": is_headless,
+            "args": args,
+            "ignore_default_args": ["--enable-automation"],
+        }
+        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+            launch_kwargs["channel"] = "chrome"
+
+        browser = await p.chromium.launch(**launch_kwargs)
 
         context = await browser.new_context(
             proxy=proxy_dict,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 900},
             locale="en-US",
             timezone_id="America/New_York",

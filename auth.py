@@ -2,11 +2,18 @@ import os
 import sys
 import asyncio
 import time
+import hashlib
+import subprocess
 from pathlib import Path
 import pyotp
 from typing import Dict, Optional, Tuple
 from loguru import logger
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+try:
+    from patchright.async_api import async_playwright, Browser, BrowserContext, Page
+    USING_PATCHRIGHT = True
+except ImportError:
+    from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+    USING_PATCHRIGHT = False
 from config import AccountConfig, settings, get_playwright_proxy
 
 class AuthSession:
@@ -29,85 +36,79 @@ class Authenticator:
         logger.info(f"[{self.account.email}] 生成当前 2FA 验证码: {code}")
         return code
 
-    async def create_stealth_context(self, p) -> Tuple[Browser, BrowserContext]:
+    async def create_stealth_context(self, p) -> Tuple[BrowserContext, BrowserContext]:
         proxy_dict = get_playwright_proxy(settings.http_proxy)
         if proxy_dict:
             logger.info(f"浏览器挂载代理: {proxy_dict.get('server')}")
         else:
             logger.warning("【注意】未检测到住宅代理！当前正在使用云服务器机房 IP 直连，极易触发 Cloudflare 永不放行的严格机房风控！强烈建议配置住宅代理！")
-        
-        # 渲染模式智能决策：若具备 DISPLAY (Xvfb虚拟显卡)，采用真实有头仿真模式秒过 Cloudflare
+
+        # 为每个账号创建独立的持久化浏览器 Profile 目录，持久保留 cf_clearance 与登录态
+        profile_hash = hashlib.md5(self.account.email.strip().lower().encode()).hexdigest()[:12]
+        user_data_dir = Path(__file__).parent / "browser_profiles" / f"profile_{profile_hash}"
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # 清理容器重启或异常退出遗留的 Chrome 锁文件，防止 Profile in use 报错
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            lock_file = user_data_dir / lock_name
+            if lock_file.exists() or lock_file.is_symlink():
+                try:
+                    lock_file.unlink()
+                except Exception:
+                    pass
+
+        args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1280,800",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+        ]
+
+        # 渲染模式智能决策：
+        # 1. 若具备 DISPLAY (Xvfb虚拟显卡)，采用真实有头模式避免 Headless 特征
+        # 2. 若需无头运行 (无 DISPLAY 或开启 headless)，严禁使用旧版 headless_shell，改用 Chrome 原生 --headless=new
         if os.environ.get("DISPLAY"):
             is_headless = False
-            logger.info("已挂载虚拟显卡图形渲染环境 (Xvfb/DISPLAY=:99)，采用真实浏览器模式避开 Cloudflare 质询")
-        elif sys.platform.startswith("linux"):
-            is_headless = True
+            logger.info("已挂载虚拟显卡图形渲染环境 (Xvfb/DISPLAY=:99)，采用真实有头浏览器模式避开 Cloudflare 质询")
+        elif settings.headless or sys.platform.startswith("linux"):
+            is_headless = False
+            args.append("--headless=new")
+            logger.info("已启用 Chrome 原生新版无头管线 (--headless=new)，消除 HeadlessChrome 标头与指纹差异")
         else:
-            is_headless = settings.headless
+            is_headless = False
 
         launch_kwargs = {
+            "user_data_dir": str(user_data_dir),
             "headless": is_headless,
-            "args": [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1280,800",
-                "--no-first-run",
-                "--password-store=basic",
-            ],
+            "args": args,
             "ignore_default_args": ["--enable-automation"],
+            "proxy": proxy_dict,
+            "viewport": {"width": 1280, "height": 800},
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
         }
-        # 优先使用官方 Google Chrome，无缝避开 Chromium 自动化签名风控
-        if os.path.exists("/usr/bin/google-chrome"):
+
+        # 优先使用官方 Google Chrome (兼容 Linux 与 macOS)，消除开源 Chromium 指纹特征
+        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
             launch_kwargs["channel"] = "chrome"
-            logger.info("已切换至 Google Chrome 官方正版浏览器内核，彻底消除开源 Chromium 指纹特征")
+            engine_tag = "Patchright + Chrome" if USING_PATCHRIGHT else "Playwright + Chrome"
+            logger.info(f"已启用官方 Google Chrome 正版内核 ({engine_tag}) 与持久化 Profile ({user_data_dir.name})")
 
-        browser = await p.chromium.launch(**launch_kwargs)
-        
-        # 指纹一致性：在 Linux 虚拟环境下采用与底层系统一致的 UA，杜绝 UA 与平台 (sec-ch-ua-platform) 矛盾触发风控
-        context = await browser.new_context(
-            proxy=proxy_dict,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="America/New_York",
-        )
-        
-        await context.add_init_script("""
-            // 1. 彻底清除原型链上的自动化特征 (与普通真实浏览器完全一致)
-            try {
-                const proto = Object.getPrototypeOf(navigator);
-                delete proto.webdriver;
-            } catch (e) {}
+        context = await p.chromium.launch_persistent_context(**launch_kwargs)
 
-            // 2. 真实 Linux Intel GPU WebGL 指纹 (杜绝 Windows Direct3D 在 Linux 下被判定为伪造机器人的致命矛盾)
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                if (parameter === 37445) return 'Intel Open Source Technology Center';
-                if (parameter === 37446) return 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
-                return getParameter.apply(this, arguments);
-            };
-            if (typeof WebGL2RenderingContext !== 'undefined') {
-                const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-                WebGL2RenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) return 'Intel Open Source Technology Center';
-                    if (parameter === 37446) return 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)';
-                    return getParameter2.apply(this, arguments);
-                };
-            }
-
-            // 3. 补齐 Chrome 插件与平台特征
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-            window.chrome = {
-                app: { isInstalled: false },
-                runtime: {
-                    PlatformOs: { LINUX: 'linux' }
-                }
-            };
-        """)
-        return browser, context
+        if not USING_PATCHRIGHT:
+            # 仅在未安装 patchright 时补充清除 webdriver 属性；不篡改原生 WebGL 原型链以防触发 Function.toString 风控
+            await context.add_init_script("""
+                try {
+                    const proto = Object.getPrototypeOf(navigator);
+                    delete proto.webdriver;
+                } catch (e) {}
+            """)
+        return context, context
 
     async def check_and_recover_error(self, page: Page) -> bool:
         """检测并自动恢复 OpenAI 'Oops, an error occurred! / Operation timed out' 页面"""
@@ -230,10 +231,15 @@ class Authenticator:
                 await asyncio.sleep(2)
                 continue
 
+            # 给 Turnstile 预留前 3 秒自动无感放行时间 (Patchright + 持久化 Profile 下通常无需点击即可自动放行)
+            if elapsed < 3:
+                await asyncio.sleep(1)
+                continue
+
             # 仅在未点击过时触发一次点击 (绝不重复点击打断当前认证)
             if not has_clicked:
                 clicked_successfully = False
-                # 方式 1: 穿透 Shadow DOM，遍历所有 frame 捕获 challenges.cloudflare.com 真实屏幕位置
+                # 穿透 Shadow DOM，遍历所有 frame 捕获 challenges.cloudflare.com 真实屏幕位置
                 for f in page.frames:
                     if "challenges.cloudflare.com" in f.url or "turnstile" in f.url:
                         try:
@@ -242,8 +248,8 @@ class Authenticator:
                             if box and box["width"] > 0:
                                 click_x = box["x"] + 30
                                 click_y = box["y"] + box["height"] / 2
-                                logger.info(f"[{self.account.email}] 成功定位 Cloudflare 验证框 (屏幕坐标: x={int(click_x)}, y={int(click_y)})，正在模拟自然轨迹点击复选框...")
-                                # 1. 拟人化自然轨迹平滑滑动 + 物理按压
+                                logger.info(f"[{self.account.email}] 成功定位 Cloudflare 验证框 (屏幕坐标: x={int(click_x)}, y={int(click_y)})，正在模拟自然轨迹单次点击复选框...")
+                                # 拟人化自然轨迹平滑滑动 + 单次物理按压 (避免与 xdotool 同时触发导致二次点击打断验证)
                                 await page.mouse.move(click_x - 80, click_y - 60)
                                 await asyncio.sleep(0.08)
                                 await page.mouse.move(click_x, click_y, steps=12)
@@ -252,21 +258,6 @@ class Authenticator:
                                 await asyncio.sleep(0.08)
                                 await page.mouse.up()
 
-                                # 2. 操作系统级硬件鼠标事件下发 (xdotool 双重保险)
-                                try:
-                                    if os.environ.get("DISPLAY"):
-                                        screen_click_x = int(click_x)
-                                        screen_click_y = int(click_y + 80)
-                                        subprocess.run(
-                                            ["xdotool", "mousemove", str(screen_click_x), str(screen_click_y), "click", "1"],
-                                            env=dict(os.environ, DISPLAY=os.environ.get("DISPLAY")),
-                                            timeout=2,
-                                            stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL
-                                        )
-                                except Exception:
-                                    pass
-
                                 clicked_successfully = True
                                 break
                         except Exception as e:
@@ -274,7 +265,7 @@ class Authenticator:
 
                 if clicked_successfully:
                     has_clicked = True
-                    logger.info(f"[{self.account.email}] 已成功点击验证复选框，系统进入静默等待认证状态 (不重复点击)...")
+                    logger.info(f"[{self.account.email}] 已完成单次点击验证复选框，系统进入静默等待认证状态 (不重复点击)...")
             else:
                 if now - last_log_time >= 8:
                     logger.info(f"[{self.account.email}] Cloudflare 质询等待中 ({reason}，已耗时 {elapsed} 秒)...")
@@ -295,7 +286,7 @@ class Authenticator:
 
         logger.info(f"[{self.account.email}] 开始自动化登录流程...")
         browser, context = await self.create_stealth_context(p)
-        page: Page = await context.new_page()
+        page: Page = context.pages[0] if context.pages else await context.new_page()
 
         try:
             # 允许最多 2 次全流程重试以应对偶发代理网络超时
@@ -306,6 +297,25 @@ class Authenticator:
                     await asyncio.sleep(2)
                 except Exception as e:
                     logger.warning(f"打开登录入口延迟较高: {e}")
+
+                # 检查持久化 Profile 是否已经保有有效登录会话 (若已登录则直接免验证复用)
+                try:
+                    is_cf_now, _ = await self.is_in_cloudflare(page)
+                    if not is_cf_now and "chatgpt.com" in page.url and "auth" not in page.url:
+                        cached_session = await page.evaluate("""
+                            async () => {
+                                try {
+                                    const res = await fetch('/api/auth/session');
+                                    if (!res.ok) return null;
+                                    return await res.json();
+                                } catch (e) { return null; }
+                            }
+                        """)
+                        if cached_session and cached_session.get("accessToken"):
+                            logger.success(f"[{self.account.email}] 检测到持久化 Profile 会话仍然有效，直接免登录与免 CF 验证复用！")
+                            break
+                except Exception:
+                    pass
 
                 # 动态等待：一边穿透 Cloudflare，一边等待登录表单或邮箱输入框就绪 (最多等待 120 秒)
                 start_load = time.time()
@@ -543,4 +553,4 @@ class Authenticator:
             )
 
         finally:
-            await browser.close()
+            await context.close()

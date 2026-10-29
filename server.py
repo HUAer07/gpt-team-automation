@@ -15,7 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pyotp
 from loguru import logger
-from playwright.async_api import async_playwright
+try:
+    from patchright.async_api import async_playwright
+except ImportError:
+    from playwright.async_api import async_playwright
 
 from config import settings, AccountConfig, CardConfig
 from auth import Authenticator, AuthSession

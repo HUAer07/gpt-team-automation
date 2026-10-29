@@ -9,13 +9,14 @@ ENV PYTHONUNBUFFERED=1
 
 RUN ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime && \
     apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata chrony curl && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        tzdata chrony curl xvfb xdotool scrot x11-utils && \
     dpkg-reconfigure --frontend noninteractive tzdata && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
-    playwright install chrome
+    patchright install chrome
 
 COPY . .
 
