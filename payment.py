@@ -337,7 +337,7 @@ class PaymentManager:
 
             async def stripe_post(endpoint: str, form_data: Dict[str, Any]) -> httpx.Response:
                 """优先通过配置代理请求 api.stripe.com，若代理抖动则自动回退直连"""
-                proxy_url = get_httpx_proxy()
+                proxy_url = get_httpx_proxy(settings.http_proxy)
                 if proxy_url:
                     try:
                         async with httpx.AsyncClient(proxy=proxy_url, timeout=25.0) as client:
