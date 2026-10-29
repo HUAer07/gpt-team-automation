@@ -21,7 +21,7 @@ try:
 except ImportError:
     from playwright.async_api import async_playwright
 
-from config import settings, AccountConfig, CardConfig
+from config import settings, AccountConfig, CardConfig, parse_accounts_text, parse_account_line
 from auth import Authenticator, AuthSession, get_global_playwright, get_active_browser_page
 from team_client import TeamClient
 from payment import PaymentManager
@@ -202,9 +202,11 @@ class ConfigPayload(BaseModel):
     master_email: str
     master_password: str
     master_totp_secret: str
-    child_email: str
-    child_password: str
-    child_totp_secret: str
+    child_email: Optional[str] = ""
+    child_password: Optional[str] = ""
+    child_totp_secret: Optional[str] = ""
+    children_raw: Optional[str] = ""
+    children: Optional[List[Dict[str, Any]]] = None
     http_proxy: Optional[str] = ""
     checkout_proxy: Optional[str] = ""
     headless: bool = True
@@ -235,6 +237,20 @@ async def index():
 @app.get("/api/config")
 async def get_config():
     env_vals = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
+    
+    # 获取与解析子号列表
+    raw = env_vals.get("CHILDREN_RAW", settings.children_raw)
+    parsed_children = parse_accounts_text(raw)
+    if not parsed_children:
+        # 回退单个 child
+        c_email = env_vals.get("CHILD_EMAIL", settings.child.email)
+        c_pwd = env_vals.get("CHILD_PASSWORD", settings.child.password)
+        c_totp = env_vals.get("CHILD_TOTP_SECRET", settings.child.totp_secret)
+        if c_email:
+            parsed_children = [AccountConfig(email=c_email, password=c_pwd, totp_secret=c_totp)]
+            if not raw:
+                raw = f"{c_email}----{c_pwd}----{c_totp}"
+
     return {
         "master_email": env_vals.get("MASTER_EMAIL", settings.master.email),
         "master_password": env_vals.get("MASTER_PASSWORD", settings.master.password),
@@ -242,6 +258,8 @@ async def get_config():
         "child_email": env_vals.get("CHILD_EMAIL", settings.child.email),
         "child_password": env_vals.get("CHILD_PASSWORD", settings.child.password),
         "child_totp_secret": env_vals.get("CHILD_TOTP_SECRET", settings.child.totp_secret),
+        "children_raw": raw,
+        "children": [c.model_dump() for c in parsed_children],
         "http_proxy": env_vals.get("HTTP_PROXY", settings.http_proxy or ""),
         "checkout_proxy": env_vals.get("CHECKOUT_PROXY", settings.checkout_proxy or ""),
         "headless": env_vals.get("HEADLESS", "false").lower() == "true",
@@ -265,12 +283,39 @@ async def update_config(payload: ConfigPayload):
     if not ENV_FILE.exists():
         ENV_FILE.touch()
     
+    # 1. 批量解析并准备子号列表
+    children_to_save: List[AccountConfig] = []
+    if payload.children_raw and payload.children_raw.strip():
+        children_to_save = parse_accounts_text(payload.children_raw)
+    elif payload.children:
+        for c in payload.children:
+            if isinstance(c, dict) and c.get("email"):
+                children_to_save.append(AccountConfig(
+                    email=str(c.get("email", "")).strip(),
+                    password=str(c.get("password", "")).strip(),
+                    totp_secret=str(c.get("totp_secret", "")).replace(" ", "").upper()
+                ))
+    elif payload.child_email:
+        children_to_save.append(AccountConfig(
+            email=payload.child_email.strip(),
+            password=(payload.child_password or "").strip(),
+            totp_secret=(payload.child_totp_secret or "").replace(" ", "").upper()
+        ))
+    
+    first_child = children_to_save[0] if children_to_save else AccountConfig(email="", password="", totp_secret="")
+    
+    # 标准化保存的 raw 文本 (如传入了 raw 就用原 raw，否则用标准格式重构)
+    raw_text = payload.children_raw.strip() if payload.children_raw else ""
+    if not raw_text and children_to_save:
+        raw_text = "\n".join([f"{c.email}----{c.password}----{c.totp_secret}" for c in children_to_save])
+
     set_key(str(ENV_FILE), "MASTER_EMAIL", payload.master_email)
     set_key(str(ENV_FILE), "MASTER_PASSWORD", payload.master_password)
     set_key(str(ENV_FILE), "MASTER_TOTP_SECRET", payload.master_totp_secret.replace(" ", ""))
-    set_key(str(ENV_FILE), "CHILD_EMAIL", payload.child_email)
-    set_key(str(ENV_FILE), "CHILD_PASSWORD", payload.child_password)
-    set_key(str(ENV_FILE), "CHILD_TOTP_SECRET", payload.child_totp_secret.replace(" ", ""))
+    set_key(str(ENV_FILE), "CHILDREN_RAW", raw_text)
+    set_key(str(ENV_FILE), "CHILD_EMAIL", first_child.email)
+    set_key(str(ENV_FILE), "CHILD_PASSWORD", first_child.password)
+    set_key(str(ENV_FILE), "CHILD_TOTP_SECRET", first_child.totp_secret)
     set_key(str(ENV_FILE), "HTTP_PROXY", payload.http_proxy or "")
     set_key(str(ENV_FILE), "CHECKOUT_PROXY", payload.checkout_proxy or "")
     set_key(str(ENV_FILE), "HEADLESS", "true" if payload.headless else "false")
@@ -292,9 +337,9 @@ async def update_config(payload: ConfigPayload):
     settings.master.email = payload.master_email
     settings.master.password = payload.master_password
     settings.master.totp_secret = payload.master_totp_secret.replace(" ", "")
-    settings.child.email = payload.child_email
-    settings.child.password = payload.child_password
-    settings.child.totp_secret = payload.child_totp_secret.replace(" ", "")
+    settings.children_raw = raw_text
+    settings.children = children_to_save
+    settings.child = first_child
     settings.http_proxy = payload.http_proxy if payload.http_proxy else None
     settings.checkout_proxy = payload.checkout_proxy if payload.checkout_proxy else None
     settings.headless = payload.headless
@@ -312,8 +357,8 @@ async def update_config(payload: ConfigPayload):
     settings.card.billing_state = payload.billing_state or "DE"
     settings.card.billing_zip = payload.billing_zip or "19801"
 
-    emit_log("success", "配置已成功保存并同步到运行环境")
-    return {"status": "success", "message": "配置更新成功"}
+    emit_log("success", f"配置已成功保存！当前已配置 {len(children_to_save)} 个子号")
+    return {"status": "success", "message": f"配置更新成功，当前共 {len(children_to_save)} 个子号"}
 
 @app.post("/api/verify-totp")
 async def verify_totp(payload: TotpVerifyPayload):
@@ -440,63 +485,83 @@ async def run_pipeline_worker():
         workspace_name = target_ws.get("name", "Team")
         emit_log("success", f"锁定已激活的 Team 工作区 [{workspace_name}] ID: {workspace_id}")
 
-        # 2. 邀请子号 (Owner 权限)
-        state.current_step = 2
-        state.step_message = f"步骤 2: 发送 Owner 级别邀请给 {settings.child.email}"
-        await broadcast_event("state_change", {"step": 2, "status": "running", "msg": state.step_message})
-        emit_log("info", f">>> [步骤 2/5] 母号向子号 [{settings.child.email}] 发起 Owner 权限邀请...")
-        
-        invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="account-owner")
-        if not invite_ok:
-            emit_log("error", "邀请发送失败，流程终止")
+        # 2. 邀请子号 (Owner 权限，支持批量多个子号)
+        active_children = settings.children if settings.children else ([settings.child] if settings.child.email else [])
+        if not active_children:
+            emit_log("error", "未检测到有效子号配置，流程终止")
             state.status = "error"
             return
+
+        primary_child = active_children[0]
+        state.current_step = 2
+        state.step_message = f"步骤 2: 发送 Owner 权限邀请 (共 {len(active_children)} 个子号)"
+        await broadcast_event("state_change", {"step": 2, "status": "running", "msg": state.step_message})
+        emit_log("info", f">>> [步骤 2/5] 母号向配置的 {len(active_children)} 个子号发起 Owner (account-owner) 权限邀请...")
+        
+        for idx, c in enumerate(active_children):
+            emit_log("info", f"[{idx+1}/{len(active_children)}] 正在向子号 [{c.email}] 发送邀请...")
+            invite_ok = await master_client.invite_member(workspace_id, c.email, role="account-owner")
+            if invite_ok:
+                emit_log("success", f"子号 [{c.email}] 邀请发送成功")
+            else:
+                emit_log("warning", f"子号 [{c.email}] 邀请未直接成功 (可能已在组内或需稍后核验)")
+            if idx < len(active_children) - 1:
+                await asyncio.sleep(3)
         
         emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
         await asyncio.sleep(settings.step_delay)
 
-        # 3. 子号独立临时浏览器登录与入组 (子号用完即关，不影响母号常驻浏览器)
+        # 3. 遍历各个子号独立临时浏览器登录与入组 (子号用完即关，不影响母号常驻浏览器)
         state.current_step = 3
-        state.step_message = "步骤 3: 子号独立登录并接受邀请"
+        state.step_message = f"步骤 3: 子号独立登录并接受邀请 (共 {len(active_children)} 个)"
         await broadcast_event("state_change", {"step": 3, "status": "running", "msg": state.step_message})
-        emit_log("info", f">>> [步骤 3/5] 子号 [{settings.child.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
         
-        child_auth = Authenticator(settings.child, is_master=False)
-        child_session = await child_auth.login(p)
-        child_client = TeamClient(child_session)
-        await child_client.accept_pending_invites()
-        await child_session.close_if_child()
-        child_session = None
-        
-        await asyncio.sleep(settings.step_delay)
+        for idx, c in enumerate(active_children):
+            emit_log("info", f">>> [步骤 3/5] ({idx+1}/{len(active_children)}) 子号 [{c.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
+            try:
+                c_auth = Authenticator(c, is_master=False)
+                c_session = await c_auth.login(p)
+                c_client = TeamClient(c_session)
+                accept_ok = await c_client.accept_pending_invites()
+                if accept_ok:
+                    emit_log("success", f"子号 [{c.email}] 成功确认接受入组！")
+                else:
+                    emit_log("info", f"子号 [{c.email}] 未检测到待确认邀请或已是成员")
+                await c_session.close_if_child()
+            except Exception as e_c:
+                emit_log("error", f"子号 [{c.email}] 登录或入组异常: {e_c}")
 
-        # 4. 移交所有权
+            if idx < len(active_children) - 1:
+                emit_log("info", f"等待 {settings.step_delay} 秒处理下一个子号...")
+                await asyncio.sleep(settings.step_delay)
+
+        # 4. 移交所有权给首选主子号 (Primary Owner)
         state.current_step = 4
-        state.step_message = "步骤 4: 移交 Primary Owner 主所有权"
+        state.step_message = f"步骤 4: 移交 Primary Owner 主所有权给首选子号 [{primary_child.email}]"
         await broadcast_event("state_change", {"step": 4, "status": "running", "msg": state.step_message})
-        emit_log("info", ">>> [步骤 4/5] 检索工作区用户列表并由母号发起转移...")
+        emit_log("info", f">>> [步骤 4/5] 检索工作区用户列表并移交主所有权给首选子号 [{primary_child.email}]...")
         
         members = await master_client.get_workspace_users(workspace_id)
         child_user_id = None
         for m in members:
             user_info = m.get("user", {})
-            if (user_info.get("email") or "").strip().lower() == settings.child.email.strip().lower():
+            if (user_info.get("email") or "").strip().lower() == primary_child.email.strip().lower():
                 child_user_id = user_info.get("id")
                 break
 
         if not child_user_id:
-            emit_log("error", f"未在工作区找到已入组的子号 [{settings.child.email}]")
+            emit_log("error", f"未在工作区找到已入组的首选主子号 [{primary_child.email}]")
             state.status = "error"
             return
 
-        emit_log("info", f"子号内部 ID: {child_user_id}，转让 Primary Owner...")
+        emit_log("info", f"首选子号内部 ID: {child_user_id}，转让 Primary Owner...")
         transfer_ok = await master_client.transfer_primary_ownership(workspace_id, child_user_id)
         if not transfer_ok:
             emit_log("error", "所有权转移失败！")
             state.status = "error"
             return
 
-        emit_log("success", "主所有权已成功转移至目标子号！")
+        emit_log("success", f"主所有权已成功转移至首选子号 [{primary_child.email}]！")
         await asyncio.sleep(settings.step_delay)
 
         # 5. 母号退出
@@ -506,7 +571,7 @@ async def run_pipeline_worker():
         emit_log("info", ">>> [步骤 5/5] 母号主动脱离工作区...")
         
         await master_client.leave_workspace(workspace_id)
-        emit_log("success", "母号已安全脱离，目标子号成为唯一的主所有者 (Primary Owner)！")
+        emit_log("success", f"母号已安全脱离，全部 {len(active_children)} 个子号均已留存工作区，首选子号 [{primary_child.email}] 为唯一的主所有者 (Primary Owner)！")
 
         state.status = "completed"
         state.step_message = "全流程已成功完成"
@@ -533,8 +598,9 @@ async def start_pipeline():
     
     if not settings.master.email or not settings.master.password:
         raise HTTPException(status_code=400, detail="母号邮箱和密码不能为空，请先在左侧输入！")
-    if not settings.child.email or not settings.child.password:
-        raise HTTPException(status_code=400, detail="子号邮箱和密码不能为空，请先在左侧输入！")
+    has_child = bool((settings.children and len(settings.children) > 0) or settings.child.email)
+    if not has_child:
+        raise HTTPException(status_code=400, detail="子号信息不能为空，请先在左侧输入或批量导入子号！")
     
     state.current_task = asyncio.create_task(run_pipeline_worker())
     return {"status": "started", "message": "全流程自动化已在后台启动"}

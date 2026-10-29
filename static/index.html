@@ -125,41 +125,59 @@
         </div>
       </div>
 
-      <!-- 子号配置卡片 -->
+      <!-- 子号配置卡片 (支持批量导入多账号) -->
       <div class="bg-dark-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur-sm">
         <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
           <div class="flex items-center space-x-2">
             <span class="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-sm font-semibold">子</span>
-            <h2 class="text-sm font-bold text-white">子号配置 (接管端 / 最终留存)</h2>
+            <div>
+              <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                子号配置
+                <span class="text-[11px] font-normal px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">支持批量多账号</span>
+              </h2>
+            </div>
           </div>
-          <span class="text-xs text-slate-400">被拉入并成为唯一 Owner</span>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-slate-400">已载入: <b id="child_count_badge" class="text-emerald-400">0</b> 个</span>
+          </div>
         </div>
 
-        <div class="space-y-3">
-          <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1">子号目标邮箱</label>
-            <input type="email" id="child_email" placeholder="child@example.com" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1">子号密码</label>
-            <div class="relative">
-              <input type="password" id="child_password" placeholder="••••••••" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition pr-10">
-              <button onclick="togglePassword('child_password', this)" class="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300">
-                <i class="fa-regular fa-eye"></i>
-              </button>
-            </div>
-          </div>
+        <div class="space-y-4">
+          <!-- 批量导入多行文本框 -->
           <div>
             <div class="flex items-center justify-between mb-1">
-              <label class="text-xs font-medium text-slate-400">2FA Secret 密钥 (Base32)</label>
-              <button onclick="checkTotp('child')" class="text-xs text-brand-400 hover:underline flex items-center gap-1">
-                <i class="fa-solid fa-calculator"></i> 实时验码
-              </button>
+              <label class="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-file-import text-emerald-400"></i>
+                批量导入 (格式: 账号、密码、2fa)
+              </label>
+              <div class="flex items-center gap-2 text-xs">
+                <button type="button" onclick="insertChildExample()" class="text-brand-400 hover:text-brand-300 transition text-[11px] flex items-center gap-1">
+                  <i class="fa-regular fa-lightbulb"></i> 填入样例
+                </button>
+                <span class="text-slate-600">|</span>
+                <button type="button" onclick="clearChildrenInput()" class="text-slate-400 hover:text-red-400 transition text-[11px] flex items-center gap-1">
+                  <i class="fa-regular fa-trash-can"></i> 清空
+                </button>
+              </div>
             </div>
-            <input type="text" id="child_totp_secret" placeholder="例如: KZXW6YTBOI6Q2YZZ" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition uppercase">
-            <div id="child_totp_preview" class="mt-1.5 hidden flex items-center justify-between text-xs bg-slate-800/60 px-3 py-1 rounded-lg text-emerald-400 border border-emerald-500/20">
-              <span>当前 2FA 动态码: <b id="child_totp_code" class="text-sm tracking-wider">------</b></span>
-              <span id="child_totp_timer" class="text-slate-400 text-[11px]">30s</span>
+            <textarea id="children_raw" rows="4" oninput="onChildrenRawInput()" placeholder="一行一个账号，支持格式：&#10;账号、密码、2fa密钥&#10;user@example.com----pwd123----2FA_SECRET&#10;test@example.com,pwd456,2FA_SECRET" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand-500 transition leading-relaxed resize-y"></textarea>
+            <p class="text-[11px] text-slate-500 mt-1 flex items-center gap-1">
+              <i class="fa-solid fa-circle-info text-[10px]"></i>
+              支持分隔符：顿号(、)、四连横杠(----)、逗号(,)、竖线(|)、Tab制表符。
+            </p>
+          </div>
+
+          <!-- 解析后的子号清单预览卡片 -->
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-solid fa-list-check text-brand-400"></i> 已解析子号清单
+              </span>
+              <span class="text-[10px] text-slate-500">首个子号将作为接管 Primary Owner</span>
+            </div>
+            
+            <div id="children_list_container" class="max-h-56 overflow-y-auto space-y-2 pr-1">
+              <!-- 动态渲染子号条目 -->
             </div>
           </div>
         </div>
@@ -464,6 +482,7 @@
 
   <script>
     let ws = null;
+    let currentChildren = [];
 
     window.addEventListener('DOMContentLoaded', () => {
       loadConfig();
@@ -484,6 +503,214 @@
       }
     }
 
+    // 解析单行账号信息 (支持中文顿号、----、逗号、竖线、Tab、冒号、空格等)
+    function parseChildLine(line) {
+      line = (line || '').trim();
+      if (!line || line.startsWith('#')) return null;
+
+      const seps = ['----', '---', '、', '\t', '|', ',', '，'];
+      for (const sep of seps) {
+        if (line.includes(sep)) {
+          const parts = line.split(sep).map(p => p.trim());
+          if (parts.length >= 3) {
+            return { email: parts[0], password: parts[1], totp_secret: parts[2].replace(/\s+/g, '').toUpperCase() };
+          } else if (parts.length === 2) {
+            return { email: parts[0], password: parts[1], totp_secret: '' };
+          }
+        }
+      }
+
+      // 空格分隔
+      const spaceParts = line.split(/\s+/).filter(Boolean);
+      if (spaceParts.length >= 3) {
+        return { email: spaceParts[0], password: spaceParts[1], totp_secret: spaceParts[2].replace(/\s+/g, '').toUpperCase() };
+      } else if (spaceParts.length === 2) {
+        return { email: spaceParts[0], password: spaceParts[1], totp_secret: '' };
+      }
+
+      // 冒号分隔
+      const colonParts = line.split(':').map(p => p.trim());
+      if (colonParts.length >= 3) {
+        return { email: colonParts[0], password: colonParts[1], totp_secret: colonParts[2].replace(/\s+/g, '').toUpperCase() };
+      }
+
+      return null;
+    }
+
+    function parseAccountsFromText(text) {
+      const list = [];
+      const lines = (text || '').split('\n');
+      for (const line of lines) {
+        const item = parseChildLine(line);
+        if (item && item.email) {
+          list.push(item);
+        }
+      }
+      return list;
+    }
+
+    function renderChildrenList() {
+      const container = document.getElementById('children_list_container');
+      const badge = document.getElementById('child_count_badge');
+      badge.innerText = currentChildren.length;
+
+      if (!currentChildren.length) {
+        container.innerHTML = `
+          <div class="py-4 text-center text-xs text-slate-500 bg-dark-950/60 rounded-xl border border-dashed border-slate-800">
+            <i class="fa-regular fa-folder-open mb-1 text-base text-slate-600 block"></i>
+            暂未解析到子号，请在上方输入框粘贴或输入账号信息
+          </div>
+        `;
+        return;
+      }
+
+      let html = '';
+      currentChildren.forEach((child, idx) => {
+        const isPrimary = idx === 0;
+        const roleBadge = isPrimary
+          ? `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">👑 主接管 (Primary)</span>`
+          : `<span class="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-800 text-slate-300 border border-slate-700">协管 (Owner)</span>`;
+
+        html += `
+          <div class="bg-dark-950 border ${isPrimary ? 'border-emerald-500/40 bg-emerald-950/10' : 'border-slate-800'} rounded-xl p-3 text-xs transition hover:border-slate-700 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <span class="w-5 h-5 rounded-full ${isPrimary ? 'bg-emerald-500 text-dark-950 font-bold' : 'bg-slate-800 text-slate-400'} flex items-center justify-center text-[11px] font-mono">${idx + 1}</span>
+                <span class="font-medium text-slate-200 tracking-wide select-all">${escapeHtml(child.email)}</span>
+                ${roleBadge}
+              </div>
+              <div class="flex items-center space-x-2">
+                ${!isPrimary ? `
+                  <button type="button" onclick="setPrimaryChild(${idx})" class="text-[11px] text-brand-400 hover:text-brand-300 hover:underline">
+                    设为主号
+                  </button>
+                ` : ''}
+                <button type="button" onclick="deleteChild(${idx})" class="text-slate-500 hover:text-red-400 transition" title="删除此子号">
+                  <i class="fa-regular fa-trash-can"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] pt-1 border-t border-slate-800/60">
+              <div class="flex items-center space-x-1.5 text-slate-400">
+                <span class="text-slate-500">密码:</span>
+                <span class="font-mono text-slate-300" id="child_pwd_${idx}">••••••••</span>
+                <button type="button" onclick="toggleChildItemPwd(${idx}, '${escapeQuotes(child.password)}')" class="text-slate-500 hover:text-slate-300 text-[10px]">
+                  <i class="fa-regular fa-eye" id="child_pwd_icon_${idx}"></i>
+                </button>
+              </div>
+
+              <div class="flex items-center justify-between sm:justify-end space-x-2">
+                <span class="text-slate-500">2FA:</span>
+                <span class="font-mono text-slate-300 truncate max-w-[120px]" title="${escapeHtml(child.totp_secret)}">${child.totp_secret ? child.totp_secret.slice(0, 8) + '...' : '<i class="text-slate-600">无</i>'}</span>
+                ${child.totp_secret ? `
+                  <button type="button" onclick="verifyChildItemTotp(${idx}, '${escapeQuotes(child.totp_secret)}')" class="px-2 py-0.5 rounded bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 text-[10px] flex items-center gap-1 transition">
+                    <i class="fa-solid fa-key text-[9px]"></i> 验码
+                  </button>
+                ` : ''}
+              </div>
+            </div>
+
+            <div id="child_totp_badge_${idx}" class="hidden text-[11px] bg-emerald-950/40 text-emerald-300 border border-emerald-500/30 px-2.5 py-1 rounded-lg flex items-center justify-between">
+              <span>动态码: <b id="child_totp_code_${idx}" class="font-mono tracking-widest text-emerald-400">------</b></span>
+              <span id="child_totp_timer_${idx}" class="text-[10px] text-slate-400">--s</span>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function escapeQuotes(str) {
+      if (!str) return '';
+      return String(str).replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
+    function onChildrenRawInput() {
+      const text = document.getElementById('children_raw').value;
+      currentChildren = parseAccountsFromText(text);
+      renderChildrenList();
+    }
+
+    function syncChildrenToRawText() {
+      const rawText = currentChildren.map(c => `${c.email}----${c.password}----${c.totp_secret}`).join('\n');
+      document.getElementById('children_raw').value = rawText;
+      renderChildrenList();
+    }
+
+    function setPrimaryChild(idx) {
+      if (idx > 0 && idx < currentChildren.length) {
+        const item = currentChildren.splice(idx, 1)[0];
+        currentChildren.unshift(item);
+        syncChildrenToRawText();
+      }
+    }
+
+    function deleteChild(idx) {
+      if (confirm(`确定删除子号 ${currentChildren[idx].email} 吗？`)) {
+        currentChildren.splice(idx, 1);
+        syncChildrenToRawText();
+      }
+    }
+
+    function toggleChildItemPwd(idx, realPwd) {
+      const el = document.getElementById(`child_pwd_${idx}`);
+      const icon = document.getElementById(`child_pwd_icon_${idx}`);
+      if (el.innerText === '••••••••') {
+        el.innerText = realPwd;
+        icon.classList.remove('fa-eye');
+        icon.classList.add('fa-eye-slash');
+      } else {
+        el.innerText = '••••••••';
+        icon.classList.remove('fa-eye-slash');
+        icon.classList.add('fa-eye');
+      }
+    }
+
+    async function verifyChildItemTotp(idx, secret) {
+      if (!secret) return;
+      try {
+        const res = await fetch('/api/verify-totp', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({secret})
+        });
+        const ret = await res.json();
+        if (ret.valid) {
+          const badge = document.getElementById(`child_totp_badge_${idx}`);
+          const codeEl = document.getElementById(`child_totp_code_${idx}`);
+          const timerEl = document.getElementById(`child_totp_timer_${idx}`);
+          badge.classList.remove('hidden');
+          codeEl.innerText = ret.code;
+          timerEl.innerText = ret.remaining_seconds + 's 后刷新';
+        } else {
+          alert('TOTP 验证失败: ' + (ret.error || '无效 Secret'));
+        }
+      } catch (e) {
+        alert('验码请求失败: ' + e.message);
+      }
+    }
+
+    function insertChildExample() {
+      const example = "user1@example.com、Password123!、JBSWY3DPEHPK3PXP\nuser2@example.com、Password456!、RSOEWEZPYI7VXLYREUVQQLCDINGX6RW4";
+      document.getElementById('children_raw').value = example;
+      onChildrenRawInput();
+    }
+
+    function clearChildrenInput() {
+      if (currentChildren.length > 0 && !confirm('确定清空所有已输入的子号吗？')) {
+        return;
+      }
+      document.getElementById('children_raw').value = '';
+      currentChildren = [];
+      renderChildrenList();
+    }
+
     async function loadConfig() {
       try {
         const res = await fetch('/api/config');
@@ -491,9 +718,16 @@
         document.getElementById('master_email').value = data.master_email || '';
         document.getElementById('master_password').value = data.master_password || '';
         document.getElementById('master_totp_secret').value = data.master_totp_secret || '';
-        document.getElementById('child_email').value = data.child_email || '';
-        document.getElementById('child_password').value = data.child_password || '';
-        document.getElementById('child_totp_secret').value = data.child_totp_secret || '';
+
+        // 载入多子号配置
+        let rawChildrenText = data.children_raw || '';
+        if (!rawChildrenText && data.child_email) {
+          rawChildrenText = `${data.child_email}、${data.child_password || ''}、${data.child_totp_secret || ''}`;
+        }
+        document.getElementById('children_raw').value = rawChildrenText;
+        currentChildren = parseAccountsFromText(rawChildrenText);
+        renderChildrenList();
+
         document.getElementById('http_proxy').value = data.http_proxy || '';
         document.getElementById('checkout_proxy').value = data.checkout_proxy || '';
         document.getElementById('headless').checked = !!data.headless;
@@ -540,14 +774,21 @@
     async function saveConfig(silent = false) {
       const masterEmail = document.getElementById('master_email').value.trim();
       const masterPass = document.getElementById('master_password').value.trim();
+      const childrenRaw = document.getElementById('children_raw').value.trim();
+
+      // 实时解析子号
+      const parsedChildren = parseAccountsFromText(childrenRaw);
+      const firstChild = parsedChildren[0] || {email: '', password: '', totp_secret: ''};
 
       const payload = {
         master_email: masterEmail,
         master_password: masterPass,
         master_totp_secret: document.getElementById('master_totp_secret').value.trim(),
-        child_email: document.getElementById('child_email').value.trim(),
-        child_password: document.getElementById('child_password').value.trim(),
-        child_totp_secret: document.getElementById('child_totp_secret').value.trim(),
+        child_email: firstChild.email,
+        child_password: firstChild.password,
+        child_totp_secret: firstChild.totp_secret,
+        children_raw: childrenRaw,
+        children: parsedChildren,
         http_proxy: document.getElementById('http_proxy').value.trim(),
         checkout_proxy: document.getElementById('checkout_proxy').value.trim(),
         headless: document.getElementById('headless').checked,
@@ -574,7 +815,7 @@
         });
         const ret = await res.json();
         if (!silent) {
-          alert('配置已成功保存！');
+          alert('配置已成功保存！当前已保存 ' + parsedChildren.length + ' 个子号');
         }
         return true;
       } catch (e) {
@@ -659,15 +900,17 @@
     async function startPipeline() {
       const masterEmail = document.getElementById('master_email').value.trim();
       const masterPass = document.getElementById('master_password').value.trim();
-      const childEmail = document.getElementById('child_email').value.trim();
-      const childPass = document.getElementById('child_password').value.trim();
 
       if (!masterEmail || !masterPass) {
         alert('请先在左侧完整输入母号邮箱与密码！');
         return;
       }
-      if (!childEmail || !childPass) {
-        alert('请先在左侧完整输入子号邮箱与密码！');
+      if (!currentChildren.length) {
+        alert('请先在左侧导入至少一个有效子号！');
+        return;
+      }
+      if (!currentChildren[0].password) {
+        alert('首选子号密码不能为空！');
         return;
       }
 

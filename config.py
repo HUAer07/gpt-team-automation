@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -59,7 +59,68 @@ def get_httpx_proxy(proxy_str: Optional[str] = None) -> Optional[str]:
 class AccountConfig(BaseModel):
     email: str
     password: str
-    totp_secret: str
+    totp_secret: str = ""
+
+def parse_account_line(line: str) -> Optional[AccountConfig]:
+    """解析单行账号信息，支持常见分隔符: 中文顿号(、)、----、逗号(,)、竖线(|)、Tab、冒号(:)、空格等
+    格式: 账号、密码、2fa
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    
+    # 1. 优先尝试显式特征分隔符
+    for sep in ["----", "---", "、", "\t", "|", ",", "，"]:
+        if sep in line:
+            parts = [p.strip() for p in line.split(sep)]
+            if len(parts) >= 3:
+                return AccountConfig(
+                    email=parts[0],
+                    password=parts[1],
+                    totp_secret=parts[2].replace(" ", "").upper()
+                )
+            elif len(parts) == 2:
+                return AccountConfig(
+                    email=parts[0],
+                    password=parts[1],
+                    totp_secret=""
+                )
+    
+    # 2. 空白字符分隔 (连续空格或制表)
+    parts = line.split()
+    if len(parts) >= 3:
+        return AccountConfig(
+            email=parts[0].strip(),
+            password=parts[1].strip(),
+            totp_secret=parts[2].strip().replace(" ", "").upper()
+        )
+    elif len(parts) == 2:
+        return AccountConfig(
+            email=parts[0].strip(),
+            password=parts[1].strip(),
+            totp_secret=""
+        )
+
+    # 3. 冒号分隔 (常见于 email:password:2fa)
+    parts = line.split(":")
+    if len(parts) >= 3:
+        return AccountConfig(
+            email=parts[0].strip(),
+            password=parts[1].strip(),
+            totp_secret=parts[2].strip().replace(" ", "").upper()
+        )
+    return None
+
+def parse_accounts_text(text: str) -> List[AccountConfig]:
+    """批量解析多行账号文本"""
+    results: List[AccountConfig] = []
+    if not text:
+        return results
+    for line in text.strip().splitlines():
+        acc = parse_account_line(line)
+        if acc and acc.email:
+            results.append(acc)
+    return results
 
 class CardConfig(BaseModel):
     card_number: str = Field(default_factory=lambda: os.getenv("CARD_NUMBER", ""))
@@ -97,7 +158,27 @@ class Settings(BaseModel):
             totp_secret=os.getenv("CHILD_TOTP_SECRET", "").replace(" ", ""),
         )
     )
+    children_raw: str = Field(default_factory=lambda: os.getenv("CHILDREN_RAW", ""))
+    children: List[AccountConfig] = Field(default_factory=list)
     card: CardConfig = Field(default_factory=CardConfig)
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        # 初始化解析 children 列表
+        if self.children_raw and self.children_raw.strip():
+            parsed = parse_accounts_text(self.children_raw)
+            if parsed:
+                self.children = parsed
+        
+        # 若没有 children 但有单号 child 配置，则自动包装为首个 child
+        if not self.children and self.child.email:
+            self.children = [self.child]
+            if not self.children_raw:
+                self.children_raw = f"{self.child.email}----{self.child.password}----{self.child.totp_secret}"
+        
+        # 始终同步 self.child 指向首选子号
+        if self.children:
+            self.child = self.children[0]
 
 settings = Settings()
 
