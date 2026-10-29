@@ -155,15 +155,25 @@ class TeamClient:
 
         return workspaces
 
-    async def invite_member(self, workspace_id: str, invite_email: str, role: str = "owner") -> bool:
+    async def invite_member(self, workspace_id: str, invite_email: str, role: str = "account-owner") -> bool:
         """从母号向子号发起 Owner/Admin 级别邀请"""
-        logger.info(f"[{self.session.email}] 正在向 {invite_email} 发送 {role} 邀请 (Workspace: {workspace_id})...")
+        # 规范化 role: OpenAI 新版枚举要求必须是 'account-owner', 'account-admin', 'analytics-viewer' 或 'standard-user'
+        clean_role = (role or "account-owner").lower()
+        if clean_role in ("owner", "account-owner", "account_owner", "primary-owner", "primary_owner"):
+            normalized_role = "account-owner"
+        elif clean_role in ("admin", "account-admin", "account_admin"):
+            normalized_role = "account-admin"
+        else:
+            normalized_role = clean_role
 
-        # 兼容 OpenAI 新旧两种邀请 Payload 结构
+        logger.info(f"[{self.session.email}] 正在向 {invite_email} 发送 {normalized_role} 邀请 (Workspace: {workspace_id})...")
+
+        # 兼容 OpenAI 邀请 Payload 结构 (严格使用符合枚举的 account-owner / account-admin)
         payloads = [
-            {"email_addresses": [invite_email], "role": role, "resend_emails": True},
-            {"invites": [{"email": invite_email, "role": role}]},
-            {"email_addresses": [invite_email], "role": "admin", "resend_emails": True},
+            {"email_addresses": [invite_email], "role": normalized_role, "resend_emails": True},
+            {"invites": [{"email": invite_email, "role": normalized_role}]},
+            {"email_addresses": [invite_email], "role": "account-admin", "resend_emails": True},
+            {"invites": [{"email": invite_email, "role": "account-admin"}]},
         ]
 
         for payload in payloads:
@@ -251,6 +261,8 @@ class TeamClient:
         logger.info(f"[{self.session.email}] 正在将工作区 {workspace_id} 的主所有权移交给 {new_owner_user_id}...")
         payloads = [
             {"new_primary_owner_id": new_owner_user_id},
+            {"user_id": new_owner_user_id, "role": "account-owner"},
+            {"role": "account-owner"},
             {"user_id": new_owner_user_id, "role": "primary-owner"},
         ]
         for idx, payload in enumerate(payloads):

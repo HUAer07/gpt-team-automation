@@ -76,7 +76,7 @@ async def run_pipeline():
         # 步骤 2: 母号向子号发起 Owner 级别邀请
         # ---------------------------------------------------------
         logger.info(f"\n>>> [步骤 2/5] 母号向目标子号 [{settings.child.email}] 发起 Owner 级别邀请...")
-        invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="owner")
+        invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="account-owner")
         if not invite_ok:
             logger.error("向子号发放邀请失败，中止后续流程")
             return

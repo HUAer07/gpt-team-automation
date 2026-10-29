@@ -446,7 +446,7 @@ async def run_pipeline_worker():
         await broadcast_event("state_change", {"step": 2, "status": "running", "msg": state.step_message})
         emit_log("info", f">>> [步骤 2/5] 母号向子号 [{settings.child.email}] 发起 Owner 权限邀请...")
         
-        invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="owner")
+        invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="account-owner")
         if not invite_ok:
             emit_log("error", "邀请发送失败，流程终止")
             state.status = "error"
