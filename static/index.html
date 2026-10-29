@@ -202,17 +202,42 @@
         </div>
 
         <div class="space-y-3">
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1">自定义工作区名称</label>
-              <input type="text" id="workspace_name" placeholder="Team Workspace" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">自定义工作区名称</label>
+            <input type="text" id="workspace_name" placeholder="Team Workspace" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
+          </div>
+
+          <!-- 批量优惠码配置模块 -->
+          <div class="bg-dark-950/70 border border-amber-500/30 rounded-xl p-3.5 space-y-2.5">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center space-x-1.5">
+                <i class="fa-solid fa-tags text-amber-400 text-xs"></i>
+                <span class="text-xs font-semibold text-amber-300">账单优惠码 (支持批量多码导入)</span>
+                <span class="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px]">
+                  已导入: <b id="promo_count_badge" class="font-bold">0</b> 个
+                </span>
+              </div>
+              <div class="flex items-center gap-2 text-xs">
+                <button type="button" onclick="insertPromoExample()" class="text-amber-400 hover:text-amber-300 transition text-[11px] flex items-center gap-1">
+                  <i class="fa-regular fa-lightbulb"></i> 样例
+                </button>
+                <span class="text-slate-600">|</span>
+                <button type="button" onclick="clearPromoCodes()" class="text-slate-400 hover:text-red-400 transition text-[11px] flex items-center gap-1">
+                  <i class="fa-regular fa-trash-can"></i> 清空
+                </button>
+              </div>
             </div>
-            <div>
-              <label class="block text-xs font-medium text-amber-400 mb-1 flex items-center gap-1">
-                <i class="fa-solid fa-tags text-[11px]"></i> 账单优惠码 (Promo Code)
-              </label>
-              <input type="text" id="promo_code" placeholder="例如: OPENAI50 / 折扣码" class="w-full bg-dark-950 border border-amber-500/40 rounded-xl px-3.5 py-2 text-sm text-amber-300 uppercase font-mono focus:outline-none focus:border-amber-400 transition">
+
+            <textarea id="promo_codes_raw" rows="2" oninput="onPromoCodesRawInput()" placeholder="支持导入多个优惠码，一行一个，或顿号(、)、逗号(,)、空格隔开&#10;例如：&#10;DW7R8E23P2ZL2CNZ&#10;OPENAI50" class="w-full bg-dark-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-400 transition leading-relaxed resize-y uppercase"></textarea>
+
+            <!-- 优惠码标签列表展示 -->
+            <div id="promo_tags_container" class="flex flex-wrap gap-1.5 text-xs pt-0.5">
+              <!-- 动态渲染优惠码 Tag -->
             </div>
+            <p class="text-[10px] text-slate-500 flex items-center gap-1">
+              <i class="fa-solid fa-circle-info text-[9px]"></i>
+              系统优先使用第 1 个优惠码提链，遇到失效或已达上限自动轮询下一个。
+            </p>
           </div>
 
           <div>
@@ -483,11 +508,94 @@
   <script>
     let ws = null;
     let currentChildren = [];
+    let currentPromoCodes = [];
 
     window.addEventListener('DOMContentLoaded', () => {
       loadConfig();
       initWebSocket();
     });
+
+    // 解析优惠码列表 (支持换行、顿号、逗号、分号、空格)
+    function parsePromoCodesFromText(text) {
+      if (!text) return [];
+      const clean = text.replace(/[、,，;；]/g, '\n');
+      const list = [];
+      for (const line of clean.split('\n')) {
+        for (const item of line.trim().split(/\s+/)) {
+          const code = item.trim().toUpperCase();
+          if (code && !list.includes(code)) {
+            list.push(code);
+          }
+        }
+      }
+      return list;
+    }
+
+    function renderPromoTags() {
+      const container = document.getElementById('promo_tags_container');
+      const badge = document.getElementById('promo_count_badge');
+      badge.innerText = currentPromoCodes.length;
+
+      if (!currentPromoCodes.length) {
+        container.innerHTML = `<span class="text-[11px] text-slate-500 italic">暂无有效优惠码 (将使用原价标准通道)</span>`;
+        return;
+      }
+
+      let html = '';
+      currentPromoCodes.forEach((code, idx) => {
+        const isFirst = idx === 0;
+        html += `
+          <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono ${isFirst ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-slate-800 text-slate-300 border border-slate-700'}">
+            <span class="text-[10px] text-slate-400">#${idx + 1}</span>
+            <span class="font-bold select-all">${escapeHtml(code)}</span>
+            ${isFirst ? '<span class="text-[9px] bg-amber-400 text-dark-950 font-bold px-1 rounded">优先</span>' : ''}
+            <div class="flex items-center gap-1 ml-1">
+              ${!isFirst ? `<button type="button" onclick="setPrimaryPromo(${idx})" class="text-[10px] text-amber-400 hover:underline" title="设为优先尝试">置顶</button>` : ''}
+              <button type="button" onclick="deletePromo(${idx})" class="text-slate-400 hover:text-red-400 transition" title="删除此优惠码">
+                <i class="fa-solid fa-xmark text-[10px]"></i>
+              </button>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    function onPromoCodesRawInput() {
+      const text = document.getElementById('promo_codes_raw').value;
+      currentPromoCodes = parsePromoCodesFromText(text);
+      renderPromoTags();
+    }
+
+    function syncPromoCodesToRawText() {
+      document.getElementById('promo_codes_raw').value = currentPromoCodes.join('\n');
+      renderPromoTags();
+    }
+
+    function setPrimaryPromo(idx) {
+      if (idx > 0 && idx < currentPromoCodes.length) {
+        const item = currentPromoCodes.splice(idx, 1)[0];
+        currentPromoCodes.unshift(item);
+        syncPromoCodesToRawText();
+      }
+    }
+
+    function deletePromo(idx) {
+      currentPromoCodes.splice(idx, 1);
+      syncPromoCodesToRawText();
+    }
+
+    function insertPromoExample() {
+      const example = "DW7R8E23P2ZL2CNZ\nOPENAI50\nSUMMERTEAM";
+      document.getElementById('promo_codes_raw').value = example;
+      onPromoCodesRawInput();
+    }
+
+    function clearPromoCodes() {
+      document.getElementById('promo_codes_raw').value = '';
+      currentPromoCodes = [];
+      renderPromoTags();
+    }
 
     function togglePassword(inputId, btn) {
       const input = document.getElementById(inputId);
@@ -736,7 +844,16 @@
         
         // 支付与免税地址配置
         document.getElementById('workspace_name').value = data.workspace_name || 'Team Workspace';
-        document.getElementById('promo_code').value = data.promo_code || '';
+        
+        // 载入多优惠码配置
+        let rawPromoText = data.promo_codes_raw || '';
+        if (!rawPromoText && data.promo_code) {
+          rawPromoText = data.promo_code;
+        }
+        document.getElementById('promo_codes_raw').value = rawPromoText;
+        currentPromoCodes = parsePromoCodesFromText(rawPromoText);
+        renderPromoTags();
+
         document.getElementById('card_number').value = data.card_number || '';
         document.getElementById('card_exp').value = data.card_exp || '';
         document.getElementById('card_cvc').value = data.card_cvc || '';
@@ -776,9 +893,13 @@
       const masterPass = document.getElementById('master_password').value.trim();
       const childrenRaw = document.getElementById('children_raw').value.trim();
 
-      // 实时解析子号
+      // 实时解析子号与优惠码
       const parsedChildren = parseAccountsFromText(childrenRaw);
       const firstChild = parsedChildren[0] || {email: '', password: '', totp_secret: ''};
+
+      const promoRaw = document.getElementById('promo_codes_raw').value.trim();
+      const parsedPromos = parsePromoCodesFromText(promoRaw);
+      const firstPromo = parsedPromos[0] || '';
 
       const payload = {
         master_email: masterEmail,
@@ -794,7 +915,9 @@
         headless: document.getElementById('headless').checked,
         step_delay_seconds: parseInt(document.getElementById('step_delay_seconds').value),
         workspace_name: document.getElementById('workspace_name').value.trim(),
-        promo_code: document.getElementById('promo_code').value.trim(),
+        promo_code: firstPromo,
+        promo_codes_raw: promoRaw,
+        promo_codes: parsedPromos,
         card_number: document.getElementById('card_number').value.trim(),
         card_exp: document.getElementById('card_exp').value.trim(),
         card_cvc: document.getElementById('card_cvc').value.trim(),
@@ -815,7 +938,7 @@
         });
         const ret = await res.json();
         if (!silent) {
-          alert('配置已成功保存！当前已保存 ' + parsedChildren.length + ' 个子号');
+          alert('配置已成功保存！当前已保存 ' + parsedChildren.length + ' 个子号，' + parsedPromos.length + ' 个优惠码');
         }
         return true;
       } catch (e) {

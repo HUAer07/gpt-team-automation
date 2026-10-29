@@ -122,6 +122,19 @@ def parse_accounts_text(text: str) -> List[AccountConfig]:
             results.append(acc)
     return results
 
+def parse_promo_codes(text: str) -> List[str]:
+    """批量解析多个优惠码，支持换行、中文顿号(、)、英文逗号(,)、中文逗号(，)、分号(;)、空格等"""
+    if not text:
+        return []
+    raw = text.replace("、", "\n").replace(",", "\n").replace("，", "\n").replace(";", "\n").replace("；", "\n")
+    codes: List[str] = []
+    for line in raw.splitlines():
+        for item in line.split():
+            clean = item.strip().upper()
+            if clean and clean not in codes:
+                codes.append(clean)
+    return codes
+
 class CardConfig(BaseModel):
     card_number: str = Field(default_factory=lambda: os.getenv("CARD_NUMBER", ""))
     card_exp: str = Field(default_factory=lambda: os.getenv("CARD_EXP", ""))
@@ -130,6 +143,8 @@ class CardConfig(BaseModel):
     auto_pay: bool = Field(default_factory=lambda: os.getenv("AUTO_PAY", "false").lower() == "true")
     workspace_name: str = Field(default_factory=lambda: os.getenv("WORKSPACE_NAME", "Team Workspace"))
     promo_code: str = Field(default_factory=lambda: os.getenv("PROMO_CODE", ""))
+    promo_codes_raw: str = Field(default_factory=lambda: os.getenv("PROMO_CODES_RAW", ""))
+    promo_codes: List[str] = Field(default_factory=list)
     
     # 美国免税地址配置 (默认: 特拉华州 Delaware - 0% 消费税)
     billing_country: str = Field(default_factory=lambda: os.getenv("BILLING_COUNTRY", "US"))
@@ -137,6 +152,21 @@ class CardConfig(BaseModel):
     billing_city: str = Field(default_factory=lambda: os.getenv("BILLING_CITY", "Wilmington"))
     billing_state: str = Field(default_factory=lambda: os.getenv("BILLING_STATE", "DE"))
     billing_zip: str = Field(default_factory=lambda: os.getenv("BILLING_ZIP", "19801"))
+
+    def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
+        if self.promo_codes_raw and self.promo_codes_raw.strip():
+            parsed = parse_promo_codes(self.promo_codes_raw)
+            if parsed:
+                self.promo_codes = parsed
+        
+        if not self.promo_codes and self.promo_code:
+            self.promo_codes = [self.promo_code.strip().upper()]
+            if not self.promo_codes_raw:
+                self.promo_codes_raw = self.promo_code.strip().upper()
+        
+        if self.promo_codes:
+            self.promo_code = self.promo_codes[0]
 
 class Settings(BaseModel):
     http_proxy: Optional[str] = Field(default_factory=lambda: os.getenv("HTTP_PROXY"))

@@ -7,7 +7,7 @@ import base64
 import uuid
 import random
 import urllib.parse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union, List
 from loguru import logger
 import httpx
 try:
@@ -49,17 +49,13 @@ class PaymentManager:
     async def extract_checkout_url_via_api(
         self,
         workspace_name: str = "Team Workspace",
-        promo_code: Optional[str] = None
+        promo_code: Optional[Union[str, List[str]]] = None
     ) -> Optional[str]:
         """
-        支持【常用代理 + 提链代理】双代理分离架构提取 3 席位 Stripe 支付长链：
-        - 若配置了独立【提链代理 (checkout_proxy)】，自动探测提链代理所属国家/币种（如 CO/COP），
-          优先在母号浏览器内以该国家/币种发起提链；若锁区优惠码强制校验提链代理出口 IP，
-          则自动将母号 Cookie 免登录克隆至提链代理临时通道完成提链，母号常驻窗口保持在常用代理不动。
+        支持【常用代理 + 提链代理】双代理分离架构提取 3 席位 Stripe 支付长链，
+        支持批量多优惠码轮询提取：当配置多个优惠码时按序尝试，遇到失效自动轮询下一个。
         """
-        clean_promo = (promo_code or "").strip()
         ws_name = (workspace_name or "myWorkspace").strip() or "myWorkspace"
-
         checkout_proxy_raw = (settings.checkout_proxy or "").strip()
         common_proxy_raw = (settings.http_proxy or "").strip()
         override_country = None
@@ -69,6 +65,20 @@ class PaymentManager:
             logger.info(
                 f"🌐 检测到已配置独立【提链代理】，识别出口国家/地区: {override_country or '自动探测'}"
             )
+
+        # 整理候选优惠码列表
+        candidates_promo: List[str] = []
+        if isinstance(promo_code, list):
+            candidates_promo = [p.strip().upper() for p in promo_code if p and p.strip()]
+        elif isinstance(promo_code, str) and promo_code.strip():
+            candidates_promo = [promo_code.strip().upper()]
+        elif settings.card.promo_codes:
+            candidates_promo = [p.strip().upper() for p in settings.card.promo_codes if p and p.strip()]
+        elif settings.card.promo_code:
+            candidates_promo = [settings.card.promo_code.strip().upper()]
+
+        if not candidates_promo:
+            candidates_promo = [""]
 
         eval_js = """
                     async ({ workspaceName, promoCode, fallbackCountry, overrideCountry }) => {
@@ -223,87 +233,97 @@ class PaymentManager:
                     }
         """
 
-        eval_args = {
-            "workspaceName": ws_name,
-            "promoCode": clean_promo,
-            "fallbackCountry": settings.card.billing_country or "US",
-            "overrideCountry": override_country,
-        }
+        for p_idx, current_promo in enumerate(candidates_promo):
+            eval_args = {
+                "workspaceName": ws_name,
+                "promoCode": current_promo,
+                "fallbackCountry": settings.card.billing_country or "US",
+                "overrideCountry": override_country,
+            }
 
-        if self.session.page and not self.session.page.is_closed():
-            page = self.session.page
-            try:
-                if "chatgpt.com" not in page.url:
-                    await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(1.5)
+            promo_label = f"优惠码 [{current_promo}]" if current_promo else "标准无优惠码"
+            if len(candidates_promo) > 1:
+                logger.info(f"🏷️ [{p_idx + 1}/{len(candidates_promo)}] 正在尝试使用 {promo_label} 提取 3 席位 Team 长链...")
 
-                logger.info(
-                    f"正在通过母号常驻浏览器内联接口创建 3 席位 Team 结账长链 "
-                    f"(空间名: {ws_name}, 优惠码: {clean_promo or '无'})..."
-                )
-
-                result = await page.evaluate(eval_js, eval_args)
-
-                if result and result.get("ok") and result.get("url"):
-                    url = result["url"]
-                    logger.success(
-                        f"🎯 成功提取 3 席位支付长链 "
-                        f"(地区: {result.get('country')}/{result.get('currency')}, "
-                        f"优惠码生效: {result.get('usedPromo')}): {url}"
-                    )
-                    return url
-                else:
-                    logger.warning(f"常驻浏览器内联 API 提取长链返回告警: {result.get('error') if result else '无响应'}")
-            except Exception as e:
-                logger.warning(f"母号浏览器内联 API 提取长链异常: {e}")
-
-        # 若配置了不同于常用代理的【独立提链代理 (checkout_proxy)】，自动克隆母号 Cookie 至提链代理临时通道重试
-        if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw:
-            proxy_dict = get_playwright_proxy(checkout_proxy_raw)
-            if proxy_dict:
-                logger.info(f"🔄 正在将母号 Cookie 免登录克隆至【独立提链代理 ({override_country or '锁区'})】临时通道提取长链...")
-                temp_browser = None
-                temp_ctx = None
+            # 1. 优先使用母号常驻浏览器
+            if self.session.page and not self.session.page.is_closed():
+                page = self.session.page
                 try:
-                    p = await get_global_playwright()
-                    launch_opts: Dict[str, Any] = {
-                        "headless": False if os.environ.get("DISPLAY") else True,
-                        "proxy": proxy_dict,
-                        "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
-                    }
-                    if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
-                        launch_opts["channel"] = "chrome"
-                    temp_browser = await p.chromium.launch(**launch_opts)
-                    temp_ctx = await temp_browser.new_context(locale="en-US")
-                    if self.session.cookies:
-                        await temp_ctx.add_cookies(self.session.cookies)
-                    temp_page = await temp_ctx.new_page()
-                    await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=45000)
-                    await asyncio.sleep(2.0)
-                    result = await temp_page.evaluate(eval_js, eval_args)
+                    if "chatgpt.com" not in page.url:
+                        await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(1.5)
+
+                    logger.info(
+                        f"正在通过母号常驻浏览器内联接口提取长链 "
+                        f"(空间名: {ws_name}, {promo_label})..."
+                    )
+
+                    result = await page.evaluate(eval_js, eval_args)
+
                     if result and result.get("ok") and result.get("url"):
                         url = result["url"]
                         logger.success(
-                            f"🎯 成功通过【独立提链代理临时通道】提取 3 席位支付长链 "
+                            f"🎯 成功提取 3 席位支付长链 "
                             f"(地区: {result.get('country')}/{result.get('currency')}, "
                             f"优惠码生效: {result.get('usedPromo')}): {url}"
                         )
                         return url
                     else:
-                        logger.warning(f"独立提链代理通道返回: {result.get('error') if result else '无响应'}")
+                        logger.warning(f"{promo_label} 提取返回告警: {result.get('error') if result else '无响应'}")
                 except Exception as e:
-                    logger.warning(f"独立提链代理临时通道提取异常: {e}")
-                finally:
-                    if temp_ctx:
-                        try:
-                            await temp_ctx.close()
-                        except Exception:
-                            pass
-                    if temp_browser:
-                        try:
-                            await temp_browser.close()
-                        except Exception:
-                            pass
+                    logger.warning(f"母号浏览器内联 API 提取异常 ({promo_label}): {e}")
+
+            # 2. 若配置了独立提链代理，尝试通过独立提链代理重试该码
+            if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw:
+                proxy_dict = get_playwright_proxy(checkout_proxy_raw)
+                if proxy_dict:
+                    logger.info(f"🔄 正在通过【独立提链代理临时通道】尝试 {promo_label}...")
+                    temp_browser = None
+                    temp_ctx = None
+                    try:
+                        p = await get_global_playwright()
+                        launch_opts: Dict[str, Any] = {
+                            "headless": False if os.environ.get("DISPLAY") else True,
+                            "proxy": proxy_dict,
+                            "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
+                        }
+                        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+                            launch_opts["channel"] = "chrome"
+                        temp_browser = await p.chromium.launch(**launch_opts)
+                        temp_ctx = await temp_browser.new_context(locale="en-US")
+                        if self.session.cookies:
+                            await temp_ctx.add_cookies(self.session.cookies)
+                        temp_page = await temp_ctx.new_page()
+                        await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=45000)
+                        await asyncio.sleep(2.0)
+                        result = await temp_page.evaluate(eval_js, eval_args)
+                        if result and result.get("ok") and result.get("url"):
+                            url = result["url"]
+                            logger.success(
+                                f"🎯 成功通过【独立提链代理临时通道】提取支付长链 "
+                                f"(地区: {result.get('country')}/{result.get('currency')}, "
+                                f"优惠码生效: {result.get('usedPromo')}): {url}"
+                            )
+                            return url
+                        else:
+                            logger.warning(f"独立提链代理通道 ({promo_label}) 返回: {result.get('error') if result else '无响应'}")
+                    except Exception as e:
+                        logger.warning(f"独立提链代理临时通道提取异常 ({promo_label}): {e}")
+                    finally:
+                        if temp_ctx:
+                            try:
+                                await temp_ctx.close()
+                            except Exception:
+                                pass
+                        if temp_browser:
+                            try:
+                                await temp_browser.close()
+                            except Exception:
+                                pass
+
+            if p_idx < len(candidates_promo) - 1:
+                logger.info(f"⏳ 候选 {promo_label} 未能获取有效长链，即将自动轮询下一个候选优惠码...")
+                await asyncio.sleep(1.0)
 
         return None
 

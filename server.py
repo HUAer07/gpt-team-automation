@@ -21,7 +21,7 @@ try:
 except ImportError:
     from playwright.async_api import async_playwright
 
-from config import settings, AccountConfig, CardConfig, parse_accounts_text, parse_account_line
+from config import settings, AccountConfig, CardConfig, parse_accounts_text, parse_account_line, parse_promo_codes
 from auth import Authenticator, AuthSession, get_global_playwright, get_active_browser_page
 from team_client import TeamClient
 from payment import PaymentManager
@@ -213,6 +213,8 @@ class ConfigPayload(BaseModel):
     step_delay_seconds: int = 15
     workspace_name: str = "Team Workspace"
     promo_code: Optional[str] = ""
+    promo_codes_raw: Optional[str] = ""
+    promo_codes: Optional[List[str]] = None
     card_number: Optional[str] = ""
     card_exp: Optional[str] = ""
     card_cvc: Optional[str] = ""
@@ -251,6 +253,16 @@ async def get_config():
             if not raw:
                 raw = f"{c_email}----{c_pwd}----{c_totp}"
 
+    # 获取与解析优惠码列表
+    raw_promos = env_vals.get("PROMO_CODES_RAW", settings.card.promo_codes_raw)
+    parsed_promos = parse_promo_codes(raw_promos)
+    if not parsed_promos:
+        single_p = env_vals.get("PROMO_CODE", settings.card.promo_code)
+        if single_p:
+            parsed_promos = [single_p.strip().upper()]
+            if not raw_promos:
+                raw_promos = single_p.strip().upper()
+
     return {
         "master_email": env_vals.get("MASTER_EMAIL", settings.master.email),
         "master_password": env_vals.get("MASTER_PASSWORD", settings.master.password),
@@ -265,7 +277,9 @@ async def get_config():
         "headless": env_vals.get("HEADLESS", "false").lower() == "true",
         "step_delay_seconds": int(env_vals.get("STEP_DELAY_SECONDS", settings.step_delay)),
         "workspace_name": env_vals.get("WORKSPACE_NAME", settings.card.workspace_name),
-        "promo_code": env_vals.get("PROMO_CODE", settings.card.promo_code),
+        "promo_code": parsed_promos[0] if parsed_promos else "",
+        "promo_codes_raw": raw_promos,
+        "promo_codes": parsed_promos,
         "card_number": env_vals.get("CARD_NUMBER", settings.card.card_number),
         "card_exp": env_vals.get("CARD_EXP", settings.card.card_exp),
         "card_cvc": env_vals.get("CARD_CVC", settings.card.card_cvc),
@@ -309,6 +323,18 @@ async def update_config(payload: ConfigPayload):
     if not raw_text and children_to_save:
         raw_text = "\n".join([f"{c.email}----{c.password}----{c.totp_secret}" for c in children_to_save])
 
+    # 2. 批量解析并准备优惠码列表
+    promos_to_save: List[str] = []
+    if payload.promo_codes_raw and payload.promo_codes_raw.strip():
+        promos_to_save = parse_promo_codes(payload.promo_codes_raw)
+    elif payload.promo_codes:
+        promos_to_save = [str(p).strip().upper() for p in payload.promo_codes if p and str(p).strip()]
+    elif payload.promo_code and payload.promo_code.strip():
+        promos_to_save = [payload.promo_code.strip().upper()]
+
+    first_promo = promos_to_save[0] if promos_to_save else ""
+    raw_promos_text = payload.promo_codes_raw.strip() if payload.promo_codes_raw else "\n".join(promos_to_save)
+
     set_key(str(ENV_FILE), "MASTER_EMAIL", payload.master_email)
     set_key(str(ENV_FILE), "MASTER_PASSWORD", payload.master_password)
     set_key(str(ENV_FILE), "MASTER_TOTP_SECRET", payload.master_totp_secret.replace(" ", ""))
@@ -321,7 +347,8 @@ async def update_config(payload: ConfigPayload):
     set_key(str(ENV_FILE), "HEADLESS", "true" if payload.headless else "false")
     set_key(str(ENV_FILE), "STEP_DELAY_SECONDS", str(payload.step_delay_seconds))
     set_key(str(ENV_FILE), "WORKSPACE_NAME", payload.workspace_name)
-    set_key(str(ENV_FILE), "PROMO_CODE", payload.promo_code or "")
+    set_key(str(ENV_FILE), "PROMO_CODE", first_promo)
+    set_key(str(ENV_FILE), "PROMO_CODES_RAW", raw_promos_text)
     set_key(str(ENV_FILE), "CARD_NUMBER", payload.card_number or "")
     set_key(str(ENV_FILE), "CARD_EXP", payload.card_exp or "")
     set_key(str(ENV_FILE), "CARD_CVC", payload.card_cvc or "")
@@ -345,7 +372,9 @@ async def update_config(payload: ConfigPayload):
     settings.headless = payload.headless
     settings.step_delay = payload.step_delay_seconds
     settings.card.workspace_name = payload.workspace_name
-    settings.card.promo_code = payload.promo_code or ""
+    settings.card.promo_code = first_promo
+    settings.card.promo_codes_raw = raw_promos_text
+    settings.card.promo_codes = promos_to_save
     settings.card.card_number = payload.card_number or ""
     settings.card.card_exp = payload.card_exp or ""
     settings.card.card_cvc = payload.card_cvc or ""
@@ -357,8 +386,8 @@ async def update_config(payload: ConfigPayload):
     settings.card.billing_state = payload.billing_state or "DE"
     settings.card.billing_zip = payload.billing_zip or "19801"
 
-    emit_log("success", f"配置已成功保存！当前已配置 {len(children_to_save)} 个子号")
-    return {"status": "success", "message": f"配置更新成功，当前共 {len(children_to_save)} 个子号"}
+    emit_log("success", f"配置已保存！已就绪 {len(children_to_save)} 个子号，{len(promos_to_save)} 个优惠码")
+    return {"status": "success", "message": f"配置更新成功，当前已配置 {len(children_to_save)} 个子号，{len(promos_to_save)} 个优惠码"}
 
 @app.post("/api/verify-totp")
 async def verify_totp(payload: TotpVerifyPayload):
@@ -403,7 +432,8 @@ async def manual_extract_link():
         master_session = await master_auth.login(p)
         pay_mgr = PaymentManager(master_session)
 
-        url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
+        promo_candidates = settings.card.promo_codes if settings.card.promo_codes else ([settings.card.promo_code] if settings.card.promo_code else None)
+        url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=promo_candidates)
         if not url:
             url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
 
@@ -443,7 +473,8 @@ async def run_pipeline_worker():
         if not workspaces:
             emit_log("warning", "母号名下暂无可用的 Team 工作区，开始通过母号常驻浏览器提取 Stripe 支付长链...")
             
-            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
+            promo_candidates = settings.card.promo_codes if settings.card.promo_codes else ([settings.card.promo_code] if settings.card.promo_code else None)
+            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=promo_candidates)
             if not checkout_url:
                 checkout_url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
 

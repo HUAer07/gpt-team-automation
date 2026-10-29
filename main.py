@@ -43,7 +43,8 @@ async def run_pipeline():
         workspaces = await master_client.list_workspaces()
         if not workspaces:
             logger.warning("未检测到已就绪的 Team 工作区，开始提取 Stripe 支付长链...")
-            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
+            promo_candidates = settings.card.promo_codes if settings.card.promo_codes else ([settings.card.promo_code] if settings.card.promo_code else None)
+            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=promo_candidates)
             if not checkout_url:
                 checkout_url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
 
