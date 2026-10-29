@@ -489,8 +489,6 @@ class PaymentManager:
             }
             if consent_collection.get("terms_of_service") == "required":
                 confirm_payload["consent[terms_of_service]"] = "accepted"
-            if not page_state.get("customer_email") and customer_email:
-                confirm_payload["customer_email"] = customer_email
 
             conf_resp = await stripe_post(
                 f"https://api.stripe.com/v1/payment_pages/{cs_id}/confirm",
