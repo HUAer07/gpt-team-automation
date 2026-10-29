@@ -149,6 +149,7 @@ class ConfigPayload(BaseModel):
     child_password: str
     child_totp_secret: str
     http_proxy: Optional[str] = ""
+    checkout_proxy: Optional[str] = ""
     headless: bool = True
     step_delay_seconds: int = 15
     workspace_name: str = "Team Workspace"
@@ -185,6 +186,7 @@ async def get_config():
         "child_password": env_vals.get("CHILD_PASSWORD", settings.child.password),
         "child_totp_secret": env_vals.get("CHILD_TOTP_SECRET", settings.child.totp_secret),
         "http_proxy": env_vals.get("HTTP_PROXY", settings.http_proxy or ""),
+        "checkout_proxy": env_vals.get("CHECKOUT_PROXY", settings.checkout_proxy or ""),
         "headless": env_vals.get("HEADLESS", "false").lower() == "true",
         "step_delay_seconds": int(env_vals.get("STEP_DELAY_SECONDS", settings.step_delay)),
         "workspace_name": env_vals.get("WORKSPACE_NAME", settings.card.workspace_name),
@@ -213,6 +215,7 @@ async def update_config(payload: ConfigPayload):
     set_key(str(ENV_FILE), "CHILD_PASSWORD", payload.child_password)
     set_key(str(ENV_FILE), "CHILD_TOTP_SECRET", payload.child_totp_secret.replace(" ", ""))
     set_key(str(ENV_FILE), "HTTP_PROXY", payload.http_proxy or "")
+    set_key(str(ENV_FILE), "CHECKOUT_PROXY", payload.checkout_proxy or "")
     set_key(str(ENV_FILE), "HEADLESS", "true" if payload.headless else "false")
     set_key(str(ENV_FILE), "STEP_DELAY_SECONDS", str(payload.step_delay_seconds))
     set_key(str(ENV_FILE), "WORKSPACE_NAME", payload.workspace_name)
@@ -236,6 +239,7 @@ async def update_config(payload: ConfigPayload):
     settings.child.password = payload.child_password
     settings.child.totp_secret = payload.child_totp_secret.replace(" ", "")
     settings.http_proxy = payload.http_proxy if payload.http_proxy else None
+    settings.checkout_proxy = payload.checkout_proxy if payload.checkout_proxy else None
     settings.headless = payload.headless
     settings.step_delay = payload.step_delay_seconds
     settings.card.workspace_name = payload.workspace_name

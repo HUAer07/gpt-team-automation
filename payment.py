@@ -4,6 +4,8 @@ import asyncio
 import re
 import json
 import base64
+import uuid
+import random
 import urllib.parse
 from typing import Optional, Dict, Any
 from loguru import logger
@@ -14,7 +16,7 @@ except ImportError:
     from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
-from auth import AuthSession
+from auth import AuthSession, get_global_playwright
 
 
 class PaymentManager:
@@ -22,33 +24,54 @@ class PaymentManager:
         self.session = master_session
         self.base_url = "https://chatgpt.com/backend-api"
 
+    async def _detect_proxy_country(self, proxy_str: Optional[str]) -> Optional[str]:
+        """通过指定代理请求 Cloudflare trace 识别代理出口国家代码 (如 CO / US / TR)"""
+        if not proxy_str or not proxy_str.strip():
+            return None
+        # 先从代理用户名中尝试匹配常见 region 标签 (如 -region-CO) 作为兜底
+        m_reg = re.search(r"(?:region|country)[-_]([A-Za-z]{2})\b", proxy_str, re.IGNORECASE)
+        fallback_loc = m_reg.group(1).upper() if m_reg else None
+
+        httpx_proxy = get_httpx_proxy(proxy_str)
+        if not httpx_proxy:
+            return fallback_loc
+        try:
+            async with httpx.AsyncClient(proxy=httpx_proxy, timeout=10.0) as client:
+                resp = await client.get("https://www.cloudflare.com/cdn-cgi/trace")
+                if resp.status_code == 200:
+                    m = re.search(r"^loc=([A-Z]{2})$", resp.text, re.MULTILINE)
+                    if m:
+                        return m.group(1)
+        except Exception as e:
+            logger.warning(f"探测提链代理出口国家超时 ({e})，回退使用标识: {fallback_loc}")
+        return fallback_loc
+
     async def extract_checkout_url_via_api(
         self,
         workspace_name: str = "Team Workspace",
         promo_code: Optional[str] = None
     ) -> Optional[str]:
         """
-        直接在母号已登录的常驻浏览器页面内通过同源 fetch 调用 /backend-api/payments/checkout，
-        自动识别代理出口国家与币种，复用 Chrome TLS 指纹与 cf_clearance，彻底杜绝 Cloudflare 403 拦截。
+        支持【常用代理 + 提链代理】双代理分离架构提取 3 席位 Stripe 支付长链：
+        - 若配置了独立【提链代理 (checkout_proxy)】，自动探测提链代理所属国家/币种（如 CO/COP），
+          优先在母号浏览器内以该国家/币种发起提链；若锁区优惠码强制校验提链代理出口 IP，
+          则自动将母号 Cookie 免登录克隆至提链代理临时通道完成提链，母号常驻窗口保持在常用代理不动。
         """
         clean_promo = (promo_code or "").strip()
         ws_name = (workspace_name or "myWorkspace").strip() or "myWorkspace"
 
-        if self.session.page and not self.session.page.is_closed():
-            page = self.session.page
-            try:
-                if "chatgpt.com" not in page.url:
-                    await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(1.5)
+        checkout_proxy_raw = (settings.checkout_proxy or "").strip()
+        common_proxy_raw = (settings.http_proxy or "").strip()
+        override_country = None
 
-                logger.info(
-                    f"正在通过母号常驻浏览器内联接口创建 Team 结账长链 "
-                    f"(空间名: {ws_name}, 优惠码: {clean_promo or '无'})..."
-                )
+        if checkout_proxy_raw:
+            override_country = await self._detect_proxy_country(checkout_proxy_raw)
+            logger.info(
+                f"🌐 检测到已配置独立【提链代理】，识别出口国家/地区: {override_country or '自动探测'}"
+            )
 
-                result = await page.evaluate(
-                    """
-                    async ({ workspaceName, promoCode, fallbackCountry }) => {
+        eval_js = """
+                    async ({ workspaceName, promoCode, fallbackCountry, overrideCountry }) => {
                         const currencyMap = {
                             'AE': 'AED', 'AL': 'ALL', 'AM': 'AMD', 'AU': 'AUD', 'AW': 'AWG', 'AZ': 'AZN',
                             'BA': 'BAM', 'BD': 'BDT', 'BG': 'BGN', 'BH': 'BHD', 'BM': 'BMD', 'BR': 'BRL',
@@ -91,7 +114,7 @@ class PaymentManager:
                             if (typeof sessionId === "string" && sessionId) {
                                 const processor =
                                     (data && data.processor_entity) ||
-                                    (data && data.processorEntity) ||
+                                       (data && data.processorEntity) ||
                                     (data && data.checkout_session && data.checkout_session.processor_entity) ||
                                     "openai_llc";
                                 return `https://chatgpt.com/checkout/${encodeURIComponent(String(processor))}/${encodeURIComponent(sessionId)}`;
@@ -99,16 +122,18 @@ class PaymentManager:
                             return "";
                         }
 
-                        // 1. 自动探测当前代理出口国家与币种
-                        let country = fallbackCountry || "US";
-                        try {
-                            const traceRes = await fetch(`/cdn-cgi/trace?_=${Date.now()}`, { cache: "no-store" });
-                            if (traceRes.ok) {
-                                const traceText = await traceRes.text();
-                                const m = traceText.match(/^loc=([A-Z]{2})$/m);
-                                if (m && m[1]) country = m[1];
-                            }
-                        } catch (e) {}
+                        // 1. 优先使用提链代理锁定的国家，否则自动探测当前页面出口国家
+                        let country = overrideCountry || fallbackCountry || "US";
+                        if (!overrideCountry) {
+                            try {
+                                const traceRes = await fetch(`/cdn-cgi/trace?_=${Date.now()}`, { cache: "no-store" });
+                                if (traceRes.ok) {
+                                    const traceText = await traceRes.text();
+                                    const m = traceText.match(/^loc=([A-Z]{2})$/m);
+                                    if (m && m[1]) country = m[1];
+                                }
+                            } catch (e) {}
+                        }
                         const currency = currencyMap[country] || "USD";
 
                         // 2. 获取最新 Session AccessToken
@@ -196,13 +221,68 @@ class PaymentManager:
 
                         return { ok: false, error: errors.join(" | "), country, currency };
                     }
-                    """,
-                    {
-                        "workspaceName": ws_name,
-                        "promoCode": clean_promo,
-                        "fallbackCountry": settings.card.billing_country or "US",
-                    },
+        """
+
+        eval_args = {
+            "workspaceName": ws_name,
+            "promoCode": clean_promo,
+            "fallbackCountry": settings.card.billing_country or "US",
+            "overrideCountry": override_country,
+        }
+
+        # 若配置了独立【提链代理】且与【常用代理】不同，优先通过提链代理免登录克隆会话提链，确保锁区优惠码 100% 匹配出口 IP
+        if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw and self.session.context:
+            logger.info("🔗 正在通过独立【提链代理】通道免登录克隆母号 Cookie 提取锁区支付长链...")
+            temp_browser = None
+            try:
+                p = await get_global_playwright()
+                pw_proxy = get_playwright_proxy(checkout_proxy_raw)
+                temp_browser = await p.chromium.launch(
+                    channel="chrome",
+                    headless=True,
+                    proxy=pw_proxy,
+                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
                 )
+                temp_ctx = await temp_browser.new_context()
+                cookies = await self.session.context.cookies()
+                if cookies:
+                    await temp_ctx.add_cookies(cookies)
+                temp_page = await temp_ctx.new_page()
+                await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=35000)
+                await asyncio.sleep(1.5)
+                res_proxy = await temp_page.evaluate(eval_js, eval_args)
+                if res_proxy and res_proxy.get("ok") and res_proxy.get("url"):
+                    url = res_proxy["url"]
+                    logger.success(
+                        f"🎯 成功通过独立【提链代理】提取 3 席位支付长链 "
+                        f"(地区: {res_proxy.get('country')}/{res_proxy.get('currency')}, "
+                        f"优惠码生效: {res_proxy.get('usedPromo')}): {url}"
+                    )
+                    return url
+                else:
+                    logger.warning(f"独立【提链代理】通道返回告警 ({res_proxy.get('error') if res_proxy else '无响应'})，回退母号常驻窗口重试...")
+            except Exception as e:
+                logger.warning(f"独立【提链代理】通道异常 ({e})，回退母号常驻窗口提链...")
+            finally:
+                if temp_browser:
+                    try:
+                        await temp_browser.close()
+                    except Exception:
+                        pass
+
+        if self.session.page and not self.session.page.is_closed():
+            page = self.session.page
+            try:
+                if "chatgpt.com" not in page.url:
+                    await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(1.5)
+
+                logger.info(
+                    f"正在通过母号常驻浏览器内联接口创建 Team 结账长链 "
+                    f"(空间名: {ws_name}, 优惠码: {clean_promo or '无'})..."
+                )
+
+                result = await page.evaluate(eval_js, eval_args)
 
                 if result and result.get("ok") and result.get("url"):
                     url = result["url"]
@@ -335,15 +415,21 @@ class PaymentManager:
                 ),
             }
 
+            pay_proxy_url = get_httpx_proxy(settings.http_proxy)
+            if pay_proxy_url:
+                pay_country = await self._detect_proxy_country(settings.http_proxy)
+                logger.info(f"🌐 Stripe 协议代付使用【常用代理】通道 (出口国家: {pay_country or '自动'})")
+            else:
+                logger.info("🌐 Stripe 协议代付使用【服务器直连】通道 (未配置常用代理)")
+
             async def stripe_post(endpoint: str, form_data: Dict[str, Any]) -> httpx.Response:
-                """优先通过配置代理请求 api.stripe.com，若代理抖动则自动回退直连"""
-                proxy_url = get_httpx_proxy(settings.http_proxy)
-                if proxy_url:
+                """强制通过【常用代理 (http_proxy)】请求 api.stripe.com，绝不使用锁区提链代理扣款"""
+                if pay_proxy_url:
                     try:
-                        async with httpx.AsyncClient(proxy=proxy_url, timeout=25.0) as client:
+                        async with httpx.AsyncClient(proxy=pay_proxy_url, timeout=25.0) as client:
                             return await client.post(endpoint, data=form_data, headers=headers)
                     except Exception as proxy_err:
-                        logger.warning(f"代理请求 Stripe API 异常 ({proxy_err})，自动切换直连通道...")
+                        logger.warning(f"常用代理请求 Stripe API 异常 ({proxy_err})，自动切换直连通道...")
                 async with httpx.AsyncClient(timeout=25.0) as client:
                     return await client.post(endpoint, data=form_data, headers=headers)
 
@@ -449,6 +535,10 @@ class PaymentManager:
                     "billing_details[address][postal_code]": b_zip,
                     "payment_user_agent": "stripe.js/c264a67020; stripe-js-v3/c264a67020; checkout",
                     "pasted_fields": "number",
+                    "time_on_page": str(random.randint(15000, 32000)),
+                    "guid": str(uuid.uuid4()),
+                    "muid": str(uuid.uuid4()),
+                    "sid": str(uuid.uuid4()),
                     "key": pk,
                     "_stripe_version": "2024-06-20",
                 },
