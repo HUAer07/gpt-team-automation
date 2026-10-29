@@ -154,9 +154,7 @@ class Authenticator:
         return code
 
     def _get_target_proxy_str(self) -> Tuple[str, str]:
-        """母号优先挂载【提链代理】(以便在浏览器内直接提取锁区优惠长链)，子号挂载【常用代理】"""
-        if self.is_master and (settings.checkout_proxy or "").strip():
-            return settings.checkout_proxy.strip(), "提链代理"
+        """全局浏览器（母号与子号）统一挂载【常用代理】(美国原生住宅/ISP)，避免机房风控；仅在提链时按需使用独立提链代理"""
         return (settings.http_proxy or "").strip(), "常用代理"
 
     async def create_stealth_context(self, p) -> Tuple[BrowserContext, BrowserContext]:

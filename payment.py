@@ -248,7 +248,55 @@ class PaymentManager:
             if len(candidates_promo) > 1:
                 logger.info(f"🏷️ [{p_idx + 1}/{len(candidates_promo)}] 正在尝试使用 {promo_label} 提取 3 席位 Team 长链...")
 
-            # 1. 优先使用母号常驻浏览器
+            # 1. 若配置了独立提链代理 (如锁定 CO/COP 等优惠汇率)，优先通过独立提链通道单次提取
+            if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw:
+                proxy_dict = get_playwright_proxy(checkout_proxy_raw)
+                if proxy_dict:
+                    logger.info(f"🔄 正在通过【独立提链代理专用通道 ({override_country or '锁区'})】提取 3 席位长链 ({promo_label})...")
+                    temp_browser = None
+                    temp_ctx = None
+                    try:
+                        p = await get_global_playwright()
+                        launch_opts: Dict[str, Any] = {
+                            "headless": False if os.environ.get("DISPLAY") else True,
+                            "proxy": proxy_dict,
+                            "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
+                        }
+                        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+                            launch_opts["channel"] = "chrome"
+                        temp_browser = await p.chromium.launch(**launch_opts)
+                        temp_ctx = await temp_browser.new_context(locale="en-US")
+                        if self.session.cookies:
+                            await temp_ctx.add_cookies(self.session.cookies)
+                        temp_page = await temp_ctx.new_page()
+                        await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=45000)
+                        await asyncio.sleep(2.0)
+                        result = await temp_page.evaluate(eval_js, eval_args)
+                        if result and result.get("ok") and result.get("url"):
+                            url = result["url"]
+                            logger.success(
+                                f"🎯 成功通过【独立提链代理专用通道】提取支付长链 "
+                                f"(地区: {result.get('country')}/{result.get('currency')}, "
+                                f"优惠码生效: {result.get('usedPromo')}): {url}"
+                            )
+                            return url
+                        else:
+                            logger.warning(f"独立提链代理通道 ({promo_label}) 返回: {result.get('error') if result else '无响应'}")
+                    except Exception as e:
+                        logger.warning(f"独立提链代理临时通道提取异常 ({promo_label}): {e}")
+                    finally:
+                        if temp_ctx:
+                            try:
+                                await temp_ctx.close()
+                            except Exception:
+                                pass
+                        if temp_browser:
+                            try:
+                                await temp_browser.close()
+                            except Exception:
+                                pass
+
+            # 2. 未配置独立提链代理或提链代理失败时，使用母号常驻浏览器内联提取
             if self.session.page and not self.session.page.is_closed():
                 page = self.session.page
                 try:
@@ -275,54 +323,6 @@ class PaymentManager:
                         logger.warning(f"{promo_label} 提取返回告警: {result.get('error') if result else '无响应'}")
                 except Exception as e:
                     logger.warning(f"母号浏览器内联 API 提取异常 ({promo_label}): {e}")
-
-            # 2. 若配置了独立提链代理，尝试通过独立提链代理重试该码
-            if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw:
-                proxy_dict = get_playwright_proxy(checkout_proxy_raw)
-                if proxy_dict:
-                    logger.info(f"🔄 正在通过【独立提链代理临时通道】尝试 {promo_label}...")
-                    temp_browser = None
-                    temp_ctx = None
-                    try:
-                        p = await get_global_playwright()
-                        launch_opts: Dict[str, Any] = {
-                            "headless": False if os.environ.get("DISPLAY") else True,
-                            "proxy": proxy_dict,
-                            "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
-                        }
-                        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
-                            launch_opts["channel"] = "chrome"
-                        temp_browser = await p.chromium.launch(**launch_opts)
-                        temp_ctx = await temp_browser.new_context(locale="en-US")
-                        if self.session.cookies:
-                            await temp_ctx.add_cookies(self.session.cookies)
-                        temp_page = await temp_ctx.new_page()
-                        await temp_page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=45000)
-                        await asyncio.sleep(2.0)
-                        result = await temp_page.evaluate(eval_js, eval_args)
-                        if result and result.get("ok") and result.get("url"):
-                            url = result["url"]
-                            logger.success(
-                                f"🎯 成功通过【独立提链代理临时通道】提取支付长链 "
-                                f"(地区: {result.get('country')}/{result.get('currency')}, "
-                                f"优惠码生效: {result.get('usedPromo')}): {url}"
-                            )
-                            return url
-                        else:
-                            logger.warning(f"独立提链代理通道 ({promo_label}) 返回: {result.get('error') if result else '无响应'}")
-                    except Exception as e:
-                        logger.warning(f"独立提链代理临时通道提取异常 ({promo_label}): {e}")
-                    finally:
-                        if temp_ctx:
-                            try:
-                                await temp_ctx.close()
-                            except Exception:
-                                pass
-                        if temp_browser:
-                            try:
-                                await temp_browser.close()
-                            except Exception:
-                                pass
 
             if p_idx < len(candidates_promo) - 1:
                 logger.info(f"⏳ 候选 {promo_label} 未能获取有效长链，即将自动轮询下一个候选优惠码...")
