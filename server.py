@@ -353,10 +353,10 @@ async def run_pipeline_worker():
 
             # 检查是否开启自动代付
             if settings.card.auto_pay and settings.card.card_number:
-                emit_log("info", "检测到已开启【自动代付】，正在通过母号浏览器新标签页提交信用卡结算...")
+                emit_log("info", "检测到已开启【自动代付】，正在通过 Stripe 纯协议直连通道提交信用卡结算...")
                 pay_ok = await pay_mgr.auto_pay_stripe(p, checkout_url, settings.card)
                 if not pay_ok:
-                    emit_log("error", "自动代付未完成或遇到 3DS 验证，请点击界面长链手动完成")
+                    emit_log("error", "Stripe 协议代付未通过（详见上方返回码），可更换卡号重试或点击界面长链手动完成支付")
             else:
                 emit_log("info", "请点击控制台界面上的长链完成支付（或复制后在外部支付），系统已启动状态轮询...")
 
