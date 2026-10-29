@@ -435,6 +435,110 @@ async def verify_totp(payload: TotpVerifyPayload):
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
+class MasterCheckPayload(BaseModel):
+    auto_relogin_if_expired: bool = True
+
+@app.post("/api/master/check-status")
+async def check_master_status(payload: Optional[MasterCheckPayload] = None):
+    """独立核验母号常驻浏览器的在线状态与 OAuth 会话健康度"""
+    if not settings.master.email or not settings.master.password:
+        raise HTTPException(status_code=400, detail="母号邮箱或密码未配置，请先在左侧输入！")
+
+    auto_relogin = payload.auto_relogin_if_expired if payload else True
+    emit_log("info", f"🔍 [母号状态核验] 正在检查母号 [{settings.master.email}] 的会话有效性与在线状态...")
+
+    try:
+        p = await get_global_playwright()
+        master_auth = Authenticator(settings.master, is_master=True)
+        email_key = settings.master.email.strip().lower()
+        active_proxy_str, _ = master_auth._get_target_proxy_str()
+
+        from auth import _MASTER_SESSIONS, _MASTER_PROXIES
+        session = _MASTER_SESSIONS.get(email_key)
+        
+        is_logged_in = False
+        reason = ""
+        user_id = ""
+
+        if session and session.page and not session.page.is_closed():
+            page = session.page
+            if "chatgpt.com" not in page.url or "/auth" in page.url:
+                await page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=25000)
+                await asyncio.sleep(1.5)
+
+            health = await master_auth._check_page_session_health(page)
+            if health.get("ok"):
+                is_logged_in = True
+                user_id = health.get("data", {}).get("user", {}).get("id", session.user_id)
+            else:
+                reason = health.get("reason", "unknown")
+        else:
+            reason = "browser_not_launched"
+
+        if is_logged_in:
+            emit_log("success", f"✅ [母号状态正常] 母号 [{settings.master.email}] 处于正常登录在线状态 (UserID: {user_id or '有效会话'})")
+            return {
+                "status": "online",
+                "logged_in": True,
+                "email": settings.master.email,
+                "user_id": user_id,
+                "message": "母号在线且会话有效"
+            }
+        else:
+            emit_log("warning", f"⚠️ [母号状态离线] 母号 [{settings.master.email}] 当前未登录或会话已失效 (原因: {reason})")
+            if auto_relogin:
+                emit_log("info", "🔄 [母号自动恢复] 正在启动母号自动重新认证登录流程...")
+                new_session = await master_auth.relogin_master(p)
+                if new_session and new_session.access_token:
+                    emit_log("success", f"🎉 [母号恢复成功] 母号 [{settings.master.email}] 重新登录成功并已恢复在线！")
+                    return {
+                        "status": "online",
+                        "logged_in": True,
+                        "email": settings.master.email,
+                        "user_id": new_session.user_id,
+                        "message": "母号已成功自动重新登录"
+                    }
+                else:
+                    emit_log("error", "母号重新登录未完成，请检查账号密码、TOTP 或通过实时画面查看")
+                    return {
+                        "status": "offline",
+                        "logged_in": False,
+                        "email": settings.master.email,
+                        "reason": "relogin_failed",
+                        "message": "母号离线且重新登录未完成"
+                    }
+            return {
+                "status": "offline",
+                "logged_in": False,
+                "email": settings.master.email,
+                "reason": reason,
+                "message": f"母号处于离线状态 ({reason})"
+            }
+
+    except Exception as e:
+        emit_log("error", f"检查母号状态异常: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/master/relogin")
+async def manual_relogin_master():
+    """手动强制重新登录母号"""
+    if not settings.master.email or not settings.master.password:
+        raise HTTPException(status_code=400, detail="母号邮箱或密码未配置，请先填写！")
+    emit_log("info", f"🔄 [手动强制重登] 正在为母号 [{settings.master.email}] 重新拉起登录与 2FA 认证...")
+    try:
+        p = await get_global_playwright()
+        master_auth = Authenticator(settings.master, is_master=True)
+        session = await master_auth.relogin_master(p)
+        if session and session.access_token:
+            emit_log("success", f"🎉 [重登完成] 母号 [{settings.master.email}] 重新认证成功并恢复在线！")
+            return {"status": "success", "message": "母号重新认证成功", "user_id": session.user_id}
+        else:
+            emit_log("error", "母号重新认证未成功完成")
+            return {"status": "failed", "message": "重新认证未成功"}
+    except Exception as e:
+        emit_log("error", f"重新登录异常: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/pipeline/status")
 async def get_status():
     return {
