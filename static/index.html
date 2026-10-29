@@ -369,21 +369,41 @@
             <p class="text-xs text-slate-400 mt-0.5">自动开通/代付 · 邀请 Owner · 转移主所有权 · 平滑脱离</p>
           </div>
 
-          <div class="flex items-center space-x-2.5 w-full sm:w-auto">
+          <div class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <!-- 起始步骤选择 (断点续跑支持) -->
+            <div class="flex items-center space-x-1.5 bg-dark-950 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs text-slate-300">
+              <span class="text-slate-400 text-[11px] whitespace-nowrap flex items-center gap-1">
+                <i class="fa-solid fa-flag-checkered text-brand-400"></i>起点:
+              </span>
+              <select id="start_step_select" onchange="onStartStepChange()" class="bg-transparent text-amber-300 font-medium focus:outline-none cursor-pointer text-xs">
+                <option value="1">步骤 1: 准备与支付 (默认)</option>
+                <option value="2">步骤 2: 母号发邀请</option>
+                <option value="3">步骤 3: 子号登录入组</option>
+                <option value="4">步骤 4: 转移主所有权</option>
+                <option value="5">步骤 5: 母号安全退组</option>
+              </select>
+            </div>
+
+            <!-- 断点续跑专属高亮按钮 (失败时自动弹出) -->
+            <button id="btn-resume" onclick="resumePipeline()" class="hidden px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white font-semibold text-xs shadow-lg shadow-amber-500/25 flex items-center justify-center space-x-1.5 transition animate-pulse">
+              <i class="fa-solid fa-rotate-right"></i>
+              <span id="btn-resume-text">从失败步骤继续</span>
+            </button>
+
             <!-- 实时画面按钮 -->
-            <button onclick="toggleLiveScreen()" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
+            <button onclick="toggleLiveScreen()" class="px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
               <i class="fa-solid fa-desktop"></i>
-              <span>实时浏览器画面</span>
+              <span>实时画面</span>
             </button>
             <!-- 仅提取长链按钮 -->
-            <button onclick="extractLinkOnly()" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
+            <button onclick="extractLinkOnly()" class="px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
               <i class="fa-solid fa-link"></i>
-              <span>仅提取长链</span>
+              <span>提取长链</span>
             </button>
             <!-- 启动全流程 -->
             <button id="btn-start" onclick="startPipeline()" class="flex-1 sm:flex-none px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/25 flex items-center justify-center space-x-1.5 transition">
               <i class="fa-solid fa-play"></i>
-              <span>启动全流程</span>
+              <span id="btn-start-text">启动全流程</span>
             </button>
             <!-- 中止 -->
             <button id="btn-stop" onclick="stopPipeline()" class="px-3 py-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 font-semibold text-xs flex items-center justify-center space-x-1 transition">
@@ -397,31 +417,31 @@
         <div class="mt-6 pt-5 border-t border-slate-800">
           <div class="grid grid-cols-5 gap-2 text-center text-xs">
             
-            <div id="step-node-1" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+            <div id="step-node-1" onclick="selectStepStart(1)" title="点击以此步骤为起点" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition cursor-pointer hover:border-brand-500/50">
               <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">1</div>
               <div class="font-medium text-slate-300">母号登录</div>
               <div class="text-[10px] text-slate-500 mt-0.5">长链/开通</div>
             </div>
 
-            <div id="step-node-2" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+            <div id="step-node-2" onclick="selectStepStart(2)" title="点击以此步骤为起点" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition cursor-pointer hover:border-brand-500/50">
               <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">2</div>
               <div class="font-medium text-slate-300">发放邀请</div>
               <div class="text-[10px] text-slate-500 mt-0.5">Owner 授权</div>
             </div>
 
-            <div id="step-node-3" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+            <div id="step-node-3" onclick="selectStepStart(3)" title="点击以此步骤为起点" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition cursor-pointer hover:border-brand-500/50">
               <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">3</div>
               <div class="font-medium text-slate-300">子号入组</div>
               <div class="text-[10px] text-slate-500 mt-0.5">接受邀请</div>
             </div>
 
-            <div id="step-node-4" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+            <div id="step-node-4" onclick="selectStepStart(4)" title="点击以此步骤为起点" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition cursor-pointer hover:border-brand-500/50">
               <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">4</div>
               <div class="font-medium text-slate-300">转让所有权</div>
               <div class="text-[10px] text-slate-500 mt-0.5">Primary Owner</div>
             </div>
 
-            <div id="step-node-5" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition">
+            <div id="step-node-5" onclick="selectStepStart(5)" title="点击以此步骤为起点" class="step-card bg-slate-900 border border-slate-800 rounded-xl p-2.5 transition cursor-pointer hover:border-brand-500/50">
               <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto mb-1.5 text-xs font-bold step-icon">5</div>
               <div class="font-medium text-slate-300">母号脱离</div>
               <div class="text-[10px] text-slate-500 mt-0.5">安全退组</div>
@@ -1049,7 +1069,30 @@
       alert('已成功复制 Stripe 支付长链到剪贴板！');
     }
 
-    async function startPipeline() {
+    let currentFailedStep = 1;
+
+    function selectStepStart(step) {
+      const select = document.getElementById('start_step_select');
+      select.value = String(step);
+      onStartStepChange();
+      appendLog('info', `已手动设定任务执行起点为：【步骤 ${step}/5】`);
+    }
+
+    function onStartStepChange() {
+      const step = parseInt(document.getElementById('start_step_select').value) || 1;
+      const startBtnText = document.getElementById('btn-start-text');
+      if (step === 1) {
+        startBtnText.innerText = '启动全流程';
+      } else {
+        startBtnText.innerText = `从步骤 ${step} 启动`;
+      }
+    }
+
+    function resumePipeline() {
+      startPipeline(currentFailedStep);
+    }
+
+    async function startPipeline(explicitStep) {
       const masterEmail = document.getElementById('master_email').value.trim();
       const masterPass = document.getElementById('master_password').value.trim();
 
@@ -1068,11 +1111,19 @@
 
       await saveConfig(true); // 启动前自动同步表单配置到后端与环境
 
+      const targetStep = explicitStep || parseInt(document.getElementById('start_step_select').value) || 1;
+
       try {
-        const res = await fetch('/api/pipeline/start', {method: 'POST'});
+        const res = await fetch('/api/pipeline/start', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ start_step: targetStep })
+        });
         const ret = await res.json();
         if (res.ok) {
-          appendLog('info', '已成功下发全流程启动指令...');
+          appendLog('info', `已成功下发任务执行指令 (起始步骤: ${targetStep}/5)...`);
+          const resumeBtn = document.getElementById('btn-resume');
+          if (resumeBtn) resumeBtn.classList.add('hidden');
         } else {
           alert(ret.detail || '启动失败');
         }
@@ -1133,13 +1184,44 @@
       statusText.innerText = data.msg || data.status || '空闲就绪';
 
       const currentStep = data.step || 0;
+      const failedStep = data.failed_step || (data.status === 'error' ? currentStep : 1);
+      const resumeBtn = document.getElementById('btn-resume');
+      const resumeText = document.getElementById('btn-resume-text');
+
+      if (data.status === 'error' && failedStep > 0) {
+        currentFailedStep = failedStep;
+        if (resumeBtn && resumeText) {
+          resumeBtn.classList.remove('hidden');
+          resumeText.innerText = `从步骤 ${failedStep} 继续重跑`;
+        }
+        const select = document.getElementById('start_step_select');
+        if (select) {
+          select.value = String(failedStep);
+          onStartStepChange();
+        }
+      } else if (data.status === 'running') {
+        if (resumeBtn) resumeBtn.classList.add('hidden');
+      } else if (data.status === 'completed') {
+        if (resumeBtn) resumeBtn.classList.add('hidden');
+        currentFailedStep = 1;
+        const select = document.getElementById('start_step_select');
+        if (select) {
+          select.value = '1';
+          onStartStepChange();
+        }
+      }
+
       for (let i = 1; i <= 5; i++) {
         const el = document.getElementById(`step-node-${i}`);
         const icon = el.querySelector('.step-icon');
-        el.classList.remove('border-brand-500', 'bg-brand-500/10', 'border-emerald-500', 'bg-emerald-500/10');
-        icon.classList.remove('bg-brand-500', 'bg-emerald-500', 'text-white', 'animate-pulse');
+        el.classList.remove('border-brand-500', 'bg-brand-500/10', 'border-emerald-500', 'bg-emerald-500/10', 'border-rose-500/60', 'bg-rose-500/10');
+        icon.classList.remove('bg-brand-500', 'bg-emerald-500', 'bg-rose-500', 'text-white', 'animate-pulse');
 
-        if (i < currentStep || data.status === 'completed') {
+        if (data.status === 'error' && i === failedStep) {
+          el.classList.add('border-rose-500/60', 'bg-rose-500/10');
+          icon.classList.add('bg-rose-500', 'text-white');
+          icon.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i>';
+        } else if (i < currentStep || data.status === 'completed') {
           el.classList.add('border-emerald-500/50', 'bg-emerald-500/5');
           icon.classList.add('bg-emerald-500', 'text-white');
           icon.innerHTML = '<i class="fa-solid fa-check"></i>';
