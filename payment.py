@@ -3,10 +3,12 @@ import sys
 import asyncio
 import re
 import json
+import shutil
 import base64
 import uuid
 import random
 import urllib.parse
+from pathlib import Path
 from typing import Optional, Dict, Any, Union, List
 from loguru import logger
 import httpx
