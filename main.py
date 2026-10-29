@@ -78,37 +78,27 @@ async def run_pipeline():
         logger.info(f"成功锁定目标 Team 工作区: [{workspace_name}] ID: {workspace_id}")
 
         # ---------------------------------------------------------
-        # 步骤 2: 母号向子号发起 Owner 级别邀请
+        # 步骤 2: 母号向首选目标子号发起 Owner 级别邀请 (单空间限拉 1 个子号)
         # ---------------------------------------------------------
-        logger.info(f"\n>>> [步骤 2/5] 母号向配置的 {len(active_children)} 个子号发起 Owner 级别邀请 (account-owner)...")
-        for idx, child in enumerate(active_children):
-            logger.info(f"[{idx+1}/{len(active_children)}] 正在向子号 [{child.email}] 发起邀请...")
-            await master_client.invite_member(workspace_id, child.email, role="account-owner")
-            if idx < len(active_children) - 1:
-                await asyncio.sleep(3)
-
+        logger.info(f"\n>>> [步骤 2/5] 母号向目标子号 [{primary_child.email}] 发起 Owner (account-owner) 权限邀请 (单空间单子号模式)...")
+        await master_client.invite_member(workspace_id, primary_child.email, role="account-owner")
         logger.info(f"等待 {settings.step_delay} 秒以避免风控高频拦截...")
         await asyncio.sleep(settings.step_delay)
 
         # ---------------------------------------------------------
-        # 步骤 3: 登录子号并接受邀请
+        # 步骤 3: 登录目标子号并接受邀请
         # ---------------------------------------------------------
-        logger.info(f"\n>>> [步骤 3/5] 启动 {len(active_children)} 个子号自动登录与入组确认...")
-        for idx, child in enumerate(active_children):
-            logger.info(f"({idx+1}/{len(active_children)}) 子号 [{child.email}] 正在登录并确认接受邀请...")
-            try:
-                child_auth = Authenticator(child, is_master=False)
-                child_session = await child_auth.login(p)
-                child_client = TeamClient(child_session)
-                await child_client.accept_pending_invites()
-                await child_session.close_if_child()
-            except Exception as e_c:
-                logger.error(f"子号 [{child.email}] 登录或入组异常: {e_c}")
-                if child.email.strip().lower() == primary_child.email.strip().lower():
-                    logger.error(f"首选主子号 [{child.email}] 确认入组失败，终止后续转让流程！")
-                    return
-            if idx < len(active_children) - 1:
-                await asyncio.sleep(settings.step_delay)
+        logger.info(f"\n>>> [步骤 3/5] 启动目标子号 [{primary_child.email}] 自动登录与入组确认...")
+        try:
+            child_auth = Authenticator(primary_child, is_master=False)
+            child_session = await child_auth.login(p)
+            child_client = TeamClient(child_session)
+            await child_client.accept_pending_invites()
+            await child_session.close_if_child()
+        except Exception as e_c:
+            logger.error(f"目标子号 [{primary_child.email}] 登录或入组异常: {e_c}")
+            return
+        await asyncio.sleep(settings.step_delay)
 
         # ---------------------------------------------------------
         # 步骤 4: 检索主子号成员 ID 并移交主所有权
@@ -141,7 +131,7 @@ async def run_pipeline():
         logger.info("\n>>> [步骤 5/5] 母号主动脱离工作区...")
         leave_ok = await master_client.leave_workspace(workspace_id)
         if leave_ok:
-            logger.info(f"母号已成功退出工作区，全部 {len(active_children)} 个子号接管完成")
+            logger.info(f"母号已成功退出工作区，目标子号 [{primary_child.email}] 接管成为唯一 Primary Owner")
         else:
             logger.warning("母号主动脱离未完成，请检查是否需由子号将其踢出")
 

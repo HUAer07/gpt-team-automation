@@ -588,23 +588,19 @@ async def run_pipeline_worker(start_from_step: int = 1):
         primary_child = active_children[0]
 
         # ---------------------------------------------------------
-        # 步骤 2: 邀请子号 (Owner 权限，支持批量多个子号)
+        # 步骤 2: 邀请子号 (Owner 权限，单空间限制仅拉 1 个子号)
         # ---------------------------------------------------------
         if start_from_step <= 2:
             state.current_step = 2
-            state.step_message = f"步骤 2: 发送 Owner 权限邀请 (共 {len(active_children)} 个子号)"
+            state.step_message = f"步骤 2: 发送 Owner 权限邀请 (单空间仅拉 1 个子号: {primary_child.email})"
             await broadcast_event("state_change", {"step": 2, "failed_step": state.failed_step, "status": "running", "msg": state.step_message})
-            emit_log("info", f">>> [步骤 2/5] 母号向配置的 {len(active_children)} 个子号发起 Owner (account-owner) 权限邀请...")
+            emit_log("info", f">>> [步骤 2/5] 母号向目标子号 [{primary_child.email}] 发送 Owner (account-owner) 权限邀请 (单空间限 1 个子号)...")
             
-            for idx, c in enumerate(active_children):
-                emit_log("info", f"[{idx+1}/{len(active_children)}] 正在向子号 [{c.email}] 发送邀请...")
-                invite_ok = await master_client.invite_member(workspace_id, c.email, role="account-owner")
-                if invite_ok:
-                    emit_log("success", f"子号 [{c.email}] 邀请发送成功")
-                else:
-                    emit_log("warning", f"子号 [{c.email}] 邀请未直接成功 (可能已在组内或需稍后核验)")
-                if idx < len(active_children) - 1:
-                    await asyncio.sleep(3)
+            invite_ok = await master_client.invite_member(workspace_id, primary_child.email, role="account-owner")
+            if invite_ok:
+                emit_log("success", f"目标子号 [{primary_child.email}] 邀请发送成功")
+            else:
+                emit_log("warning", f"目标子号 [{primary_child.email}] 邀请未直接成功 (可能已在组内或需稍后核验)")
             
             emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
             await asyncio.sleep(settings.step_delay)
@@ -612,39 +608,33 @@ async def run_pipeline_worker(start_from_step: int = 1):
             emit_log("info", f"⏩ [断点续跑] 跳过步骤 2 (邀请阶段)，直接从步骤 {start_from_step} 继续...")
 
         # ---------------------------------------------------------
-        # 步骤 3: 遍历各个子号独立临时浏览器登录与入组
+        # 步骤 3: 目标子号独立临时浏览器登录与入组
         # ---------------------------------------------------------
         if start_from_step <= 3:
             state.current_step = 3
-            state.step_message = f"步骤 3: 子号独立登录并接受邀请 (共 {len(active_children)} 个)"
+            state.step_message = f"步骤 3: 目标子号 [{primary_child.email}] 独立登录并接受邀请"
             await broadcast_event("state_change", {"step": 3, "failed_step": state.failed_step, "status": "running", "msg": state.step_message})
             
-            primary_child_ok = False
-            for idx, c in enumerate(active_children):
-                emit_log("info", f">>> [步骤 3/5] ({idx+1}/{len(active_children)}) 子号 [{c.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
-                try:
-                    c_auth = Authenticator(c, is_master=False)
-                    c_session = await c_auth.login(p)
-                    c_client = TeamClient(c_session)
-                    accept_ok = await c_client.accept_pending_invites()
-                    if accept_ok:
-                        emit_log("success", f"子号 [{c.email}] 成功确认接受入组！")
-                    else:
-                        emit_log("info", f"子号 [{c.email}] 未检测到待确认邀请或已是成员")
-                    await c_session.close_if_child()
-                    if c.email.strip().lower() == primary_child.email.strip().lower():
-                        primary_child_ok = True
-                except Exception as e_c:
-                    emit_log("error", f"子号 [{c.email}] 登录或入组异常: {e_c}")
-                    if c.email.strip().lower() == primary_child.email.strip().lower():
-                        emit_log("error", f"首选主子号 [{c.email}] 登录/入组失败，终止后续转让流程以防止工作区失控！(修正后可从步骤 3 继续)")
-                        state.status = "error"
-                        state.failed_step = 3
-                        return
+            emit_log("info", f">>> [步骤 3/5] 目标子号 [{primary_child.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
+            try:
+                c_auth = Authenticator(primary_child, is_master=False)
+                c_session = await c_auth.login(p)
+                c_client = TeamClient(c_session)
+                accept_ok = await c_client.accept_pending_invites()
+                if accept_ok:
+                    emit_log("success", f"目标子号 [{primary_child.email}] 成功确认接受入组！")
+                else:
+                    emit_log("info", f"目标子号 [{primary_child.email}] 未检测到待确认邀请或已是成员")
+                await c_session.close_if_child()
+            except Exception as e_c:
+                emit_log("error", f"目标子号 [{primary_child.email}] 登录或入组异常: {e_c}")
+                emit_log("error", f"目标子号 [{primary_child.email}] 登录/入组失败，终止后续转让流程以防止工作区失控！(修正后可从步骤 3 继续)")
+                state.status = "error"
+                state.failed_step = 3
+                return
 
-                if idx < len(active_children) - 1:
-                    emit_log("info", f"等待 {settings.step_delay} 秒处理下一个子号...")
-                    await asyncio.sleep(settings.step_delay)
+            emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
+            await asyncio.sleep(settings.step_delay)
         else:
             emit_log("info", f"⏩ [断点续跑] 跳过步骤 3 (子号入组)，直接从步骤 {start_from_step} 继续...")
 
@@ -694,7 +684,7 @@ async def run_pipeline_worker(start_from_step: int = 1):
             emit_log("info", ">>> [步骤 5/5] 母号主动脱离工作区...")
             
             await master_client.leave_workspace(workspace_id)
-            emit_log("success", f"母号已安全脱离，全部 {len(active_children)} 个子号均已留存工作区，首选子号 [{primary_child.email}] 为唯一的主所有者 (Primary Owner)！")
+            emit_log("success", f"母号已安全脱离，工作区已完全交割，目标子号 [{primary_child.email}] 为唯一的主所有者 (Primary Owner)！")
 
         state.status = "completed"
         state.step_message = "全流程已成功完成"
