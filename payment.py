@@ -299,21 +299,41 @@ class PaymentManager:
             logger.error("母号浏览器上下文不存在，无法执行自动代付")
             return False
 
+        async def wait_visible(loc, timeout_ms: int = 3000) -> bool:
+            """真正等待元素可见的辅助函数 (修复 Playwright is_visible 不等待 timeout 的问题)"""
+            try:
+                await loc.first.wait_for(state="visible", timeout=timeout_ms)
+                return True
+            except Exception:
+                return False
+
         page: Page = await self.session.context.new_page()
+        pay_succeeded = False
 
         try:
             logger.info("在母号浏览器新标签页打开 Stripe 支付长链页面...")
             await page.goto(checkout_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(3)
 
-            email_field = page.locator('input#email, input[type="email"]').first
-            if await email_field.is_visible(timeout=3000):
+            # 1. 等待 Stripe React 结账表单真正渲染出来 (代理环境下通常需 5~15 秒)
+            logger.info("等待 Stripe 结账表单组件渲染就绪...")
+            form_ready_loc = page.locator(
+                'input#cardNumber, input[name="cardNumber"], input[autocomplete="cc-number"], '
+                '[data-testid="card-accordion-item-button"], button.SubmitButton, '
+                'iframe[name*="__privateStripeFrame"], iframe[title*="Secure card payment"]'
+            )
+            await wait_visible(form_ready_loc, timeout_ms=25000)
+            await asyncio.sleep(1.5)
+
+            # 2. 填写邮箱 (若可编辑且为空)
+            email_field = page.locator('input#email, input[name="email"], input[type="email"]').first
+            if await wait_visible(email_field, 2000):
                 try:
-                    if not await email_field.input_value():
+                    if await email_field.is_editable() and not await email_field.input_value():
                         await email_field.fill(self.session.email)
                 except Exception:
                     pass
 
+            # 3. 优惠码自动应用 (若页面未预填优惠码且存在优惠码输入框)
             if card.promo_code:
                 clean_promo = card.promo_code.strip()
                 promo_btn = page.locator(
@@ -321,104 +341,241 @@ class PaymentManager:
                     'button:has-text("Add promo code"), button:has-text("Promo code"), '
                     'button:has-text("优惠券代码"), [data-testid="add-promotion-code"]'
                 ).first
-                if await promo_btn.is_visible(timeout=3000):
+                if await wait_visible(promo_btn, 2000):
                     await promo_btn.click()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.6)
 
                 promo_input = page.locator(
                     'input#promotionCode, input[name="promotionCode"], '
                     'input[placeholder*="promo" i], input[placeholder*="promotion" i]'
                 ).first
-                if await promo_input.is_visible(timeout=2000):
+                if await wait_visible(promo_input, 2000):
                     await promo_input.fill(clean_promo)
                     apply_btn = page.locator('button:has-text("Apply"), button:has-text("应用"), button[aria-label*="Apply"]').first
-                    if await apply_btn.is_visible():
+                    if await wait_visible(apply_btn, 1500):
                         await apply_btn.click()
                         await asyncio.sleep(1.5)
                         logger.success(f"优惠码 [{clean_promo}] 已提交应用！")
 
-            card_frame = page.frame_locator('iframe[title*="Secure card payment input frame"], iframe[name*="__privateStripeFrame"]').first
-            card_number_input = card_frame.locator('input#cardNumber, input[name="cardnumber"]')
+            # 4. 如果支付方式处于折叠手风琴状态 (如默认选中了 Link/CashApp)，先点击展开 Card (银行卡)
+            direct_card = page.locator(
+                'input#cardNumber, input[name="cardNumber"], input[autocomplete="cc-number"], '
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).first
+            if not await wait_visible(direct_card, 2000):
+                card_accordion = page.locator(
+                    '[data-testid="card-accordion-item-button"], '
+                    'input[type="radio"][value="card"], '
+                    'label:has-text("Card"), label:has-text("银行卡")'
+                ).first
+                if await wait_visible(card_accordion, 2000):
+                    logger.info("点击展开【Card / 银行卡】支付方式面板...")
+                    await card_accordion.click()
+                    await asyncio.sleep(1.0)
 
-            if await card_number_input.is_visible(timeout=5000):
-                logger.info("在 Stripe 安全 iframe 中输入卡号...")
-                await card_number_input.click()
-                await card_number_input.type(card.card_number.replace(" ", ""), delay=60)
+            # 5. 输入卡号、有效期与 CVC (优先匹配 pay.openai.com 主文档输入框，其次匹配安全 iframe)
+            clean_number = card.card_number.replace(" ", "").strip()
+            clean_exp = card.card_exp.replace("/", "").replace(" ", "").strip()
+            clean_cvc = card.card_cvc.strip()
 
-                exp_input = card_frame.locator('input#cardExpiry, input[name="exp-date"]')
-                await exp_input.click()
-                await exp_input.type(card.card_exp.replace("/", "").replace(" ", ""), delay=60)
+            if await wait_visible(direct_card, 6000):
+                logger.info("正在填写 Stripe 托管页面信用卡号、有效期与 CVC...")
+                await direct_card.click()
+                await direct_card.fill("")
+                await direct_card.type(clean_number, delay=45)
 
-                cvc_input = card_frame.locator('input#cardCvc, input[name="cvc"]')
-                await cvc_input.click()
-                await cvc_input.type(card.card_cvc.strip(), delay=60)
+                exp_loc = page.locator(
+                    'input#cardExpiry, input[name="cardExpiry"], input[autocomplete="cc-exp"], '
+                    'input[data-elements-stable-field-name="cardExpiry"]'
+                ).first
+                if await wait_visible(exp_loc, 3000):
+                    await exp_loc.click()
+                    await exp_loc.fill("")
+                    await exp_loc.type(clean_exp, delay=45)
+
+                cvc_loc = page.locator(
+                    'input#cardCvc, input[name="cardCvc"], input[autocomplete="cc-csc"], '
+                    'input[data-elements-stable-field-name="cardCvc"]'
+                ).first
+                if await wait_visible(cvc_loc, 3000):
+                    await cvc_loc.click()
+                    await cvc_loc.fill("")
+                    await cvc_loc.type(clean_cvc, delay=45)
+                logger.success("信用卡三要素填写完成！")
             else:
-                direct_card = page.locator('input#cardNumber, input[name="cardNumber"]').first
-                if await direct_card.is_visible(timeout=3000):
-                    await direct_card.type(card.card_number.replace(" ", ""), delay=60)
-                    await page.locator('input#cardExpiry').first.type(card.card_exp.replace("/", ""), delay=60)
-                    await page.locator('input#cardCvc').first.type(card.card_cvc.strip(), delay=60)
+                card_frame = page.frame_locator(
+                    'iframe[title*="Secure card payment"], iframe[name*="__privateStripeFrame"]'
+                ).first
+                frame_card_input = card_frame.locator('input#cardNumber, input[name="cardnumber"], input[autocomplete="cc-number"]').first
+                if await wait_visible(frame_card_input, 5000):
+                    logger.info("正在 Stripe 安全 iframe 中输入卡号、有效期与 CVC...")
+                    await frame_card_input.click()
+                    await frame_card_input.type(clean_number, delay=45)
 
-            name_input = page.locator('input#billingName, input[name="billingName"]').first
-            if await name_input.is_visible(timeout=2000):
-                await name_input.fill(card.card_name)
+                    frame_exp = card_frame.locator('input#cardExpiry, input[name="exp-date"], input[autocomplete="cc-exp"]').first
+                    await frame_exp.click()
+                    await frame_exp.type(clean_exp, delay=45)
 
-            logger.info(f"配置美国免税州地址: {card.billing_city}, {card.billing_state} {card.billing_zip} (免税 0%)")
+                    frame_cvc = card_frame.locator('input#cardCvc, input[name="cvc"], input[autocomplete="cc-csc"]').first
+                    await frame_cvc.click()
+                    await frame_cvc.type(clean_cvc, delay=45)
+                    logger.success("iframe 信用卡三要素填写完成！")
+                else:
+                    logger.warning("未定位到信用卡输入框，已保存当前支付页快照排查")
 
-            country_select = page.locator('select#billingCountry, select[name="country"]').first
-            if await country_select.is_visible(timeout=2000):
+            # 6. 填写持卡人姓名
+            name_input = page.locator('input#billingName, input[name="billingName"], input[autocomplete="cc-name"]').first
+            if await wait_visible(name_input, 3000):
+                logger.info(f"正在填写持卡人姓名: {card.card_name}")
+                await name_input.click()
+                await name_input.fill(card.card_name or "ChatGPT User")
+
+            # 7. 配置美国免税州账单地址 (Delaware 19801)
+            logger.info(f"正在填写美国免税州地址: {card.billing_line1}, {card.billing_city}, {card.billing_state} {card.billing_zip}")
+
+            country_select = page.locator('select#billingCountry, select[name="billingCountry"], select[name="country"], select[autocomplete="billing country"]').first
+            if await wait_visible(country_select, 3000):
                 try:
                     await country_select.select_option(card.billing_country or "US")
+                    await asyncio.sleep(0.6)
+                except Exception:
+                    pass
+
+            # 如果页面有“手动输入地址 (Enter address manually)”按钮，优先展开完整地址字段
+            manual_addr_btn = page.locator(
+                'button:has-text("Enter address manually"), a:has-text("Enter address manually"), '
+                'button:has-text("手动输入地址"), a:has-text("手动输入地址")'
+            ).first
+            if await wait_visible(manual_addr_btn, 1000):
+                try:
+                    await manual_addr_btn.click()
+                    await asyncio.sleep(0.5)
                 except Exception:
                     pass
 
             if card.billing_line1:
-                line1_input = page.locator('input#billingAddressLine1, input[name="addressLine1"], input#address, input[name="line1"]').first
-                if await line1_input.is_visible(timeout=1500):
+                line1_input = page.locator(
+                    'input#billingAddressLine1, input[name="billingAddressLine1"], '
+                    'input[name="addressLine1"], input[autocomplete="billing address-line1"]'
+                ).first
+                if await wait_visible(line1_input, 3000):
+                    await line1_input.click()
                     await line1_input.fill(card.billing_line1)
+                    await asyncio.sleep(0.5)
+                    # 若输入地址后弹出手动展开按钮或自动补全下拉框，展开其余地址项或按 Escape 关闭下拉框
+                    if await wait_visible(manual_addr_btn, 800):
+                        try:
+                            await manual_addr_btn.click()
+                            await asyncio.sleep(0.5)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await line1_input.press("Escape")
+                        except Exception:
+                            pass
 
             if card.billing_city:
-                city_input = page.locator('input#billingLocality, input[name="locality"], input#city').first
-                if await city_input.is_visible(timeout=1500):
+                city_input = page.locator(
+                    'input#billingLocality, input[name="billingLocality"], '
+                    'input[name="locality"], input#city, input[autocomplete="billing address-level2"]'
+                ).first
+                if await wait_visible(city_input, 2500):
                     await city_input.fill(card.billing_city)
 
             if card.billing_state:
-                state_select = page.locator('select#billingAdministrativeArea, select[name="administrativeArea"], select#state').first
-                if await state_select.is_visible(timeout=1500):
+                state_select = page.locator(
+                    'select#billingAdministrativeArea, select[name="billingAdministrativeArea"], '
+                    'select[name="administrativeArea"], select#state, select[autocomplete="billing address-level1"]'
+                ).first
+                if await wait_visible(state_select, 2500):
                     try:
                         await state_select.select_option(card.billing_state)
                     except Exception:
-                        pass
+                        try:
+                            await state_select.select_option(label=card.billing_state)
+                        except Exception:
+                            pass
                 else:
-                    state_input = page.locator('input#billingAdministrativeArea, input[name="administrativeArea"], input#state').first
-                    if await state_input.is_visible(timeout=1000):
+                    state_input = page.locator(
+                        'input#billingAdministrativeArea, input[name="billingAdministrativeArea"], '
+                        'input[name="administrativeArea"], input#state'
+                    ).first
+                    if await wait_visible(state_input, 1500):
                         await state_input.fill(card.billing_state)
 
             if card.billing_zip:
-                zip_input = page.locator('input#billingPostalCode, input[name="postalCode"], input#postalCode').first
-                if await zip_input.is_visible(timeout=2000):
+                zip_input = page.locator(
+                    'input#billingPostalCode, input[name="billingPostalCode"], '
+                    'input[name="postalCode"], input#postalCode, input[autocomplete="billing postal-code"]'
+                ).first
+                if await wait_visible(zip_input, 2500):
                     await zip_input.fill(card.billing_zip)
 
-            await asyncio.sleep(1.5)
+            # 8. 检查是否有服务条款同意复选框 (Terms of Service checkbox)
+            terms_checkbox = page.locator(
+                'input#termsOfServiceConsentCheckbox, input[name="termsOfServiceConsentCheckbox"], '
+                'input[type="checkbox"][name*="terms" i], input[type="checkbox"][id*="terms" i]'
+            ).first
+            if await wait_visible(terms_checkbox, 1500):
+                try:
+                    if not await terms_checkbox.is_checked():
+                        logger.info("勾选 Stripe 结账服务条款复选框...")
+                        await terms_checkbox.check(force=True)
+                except Exception:
+                    pass
 
+            await asyncio.sleep(1.0)
+
+            # 9. 点击提交支付/订阅按钮
             submit_btn = page.locator(
-                'button.SubmitButton, button[type="submit"]:has-text("Subscribe"), '
-                'button[type="submit"]:has-text("Start trial"), button[type="submit"]:has-text("Pay")'
+                'button.SubmitButton, button[data-testid="hosted-payment-submit-button"], '
+                'button[type="submit"]:has-text("Subscribe"), button[type="submit"]:has-text("Start trial"), '
+                'button[type="submit"]:has-text("Pay"), button[type="submit"]:has-text("订阅")'
             ).first
             await submit_btn.wait_for(state="visible", timeout=10000)
             logger.info("点击提交 Stripe 支付/订阅按钮...")
             await submit_btn.click()
 
+            # 10. 智能轮询等待支付完成跳转或捕获拒付/3DS原因 (最多等待 60 秒)
             logger.info("等待 Stripe 支付结算与回调结果...")
-            await page.wait_for_url(lambda u: ("chatgpt.com" in u and "/checkout/" not in u) or "success" in u, timeout=60000)
-            logger.info("Stripe 支付完成，已成功跳回 ChatGPT！")
-            return True
+            start_wait = asyncio.get_running_loop().time()
+            last_err_text = ""
+
+            while asyncio.get_running_loop().time() - start_wait < 60:
+                cur_url = page.url
+                if ("chatgpt.com" in cur_url and "/checkout/" not in cur_url and "pay.openai.com" not in cur_url) or "success" in cur_url:
+                    logger.success("🎉 Stripe 支付完成，页面已成功跳回 ChatGPT！")
+                    pay_succeeded = True
+                    return True
+
+                # 检测页面是否弹出银行卡拒付或校验报错提示
+                err_loc = page.locator(
+                    '.FieldError, .SubmitButton-Error, [role="alert"], '
+                    '.Notice--red, .ConfirmPayment-Error'
+                ).first
+                try:
+                    if await err_loc.is_visible():
+                        err_text = (await err_loc.inner_text()).strip()
+                        if err_text and err_text != last_err_text:
+                            last_err_text = err_text
+                            logger.warning(f"Stripe 页面提示信息: {err_text}")
+                except Exception:
+                    pass
+
+                await asyncio.sleep(2.0)
+
+            logger.error(f"等待支付跳转超时 (60s){f'，最后提示: {last_err_text}' if last_err_text else ''}")
+            return False
 
         except Exception as e:
             logger.error(f"自动化代付失败或等待超时: {e}")
             return False
         finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
+            if pay_succeeded:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            else:
+                logger.info("保留当前 Stripe 支付标签页以便在【实时浏览器画面】中查看或手动处理")
