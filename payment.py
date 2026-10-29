@@ -535,6 +535,9 @@ class PaymentManager:
             logger.info("正在加载 Stripe 安全结算上下文并预热 HSW 被动验证令牌...")
             await page.goto(checkout_url, wait_until="domcontentloaded", timeout=60000)
 
+            # 预留充分时间让 Stripe 内部脚本与 hCaptcha 隐式令牌环境完全就绪 (至少等待 6-8 秒)
+            await asyncio.sleep(6.0)
+
             card_loc = page.locator("#cardNumber")
             await card_loc.wait_for(state="visible", timeout=25000)
             await asyncio.sleep(1.0)
@@ -575,14 +578,18 @@ class PaymentManager:
                     await country_loc.select_option(b_country)
                     await asyncio.sleep(1.2)
 
-            if await page.locator("#billingAddressLine1").is_visible():
-                await page.locator("#billingAddressLine1").fill(b_line1)
-            if await page.locator("#billingLocality").is_visible():
-                await page.locator("#billingLocality").fill(b_city)
-            if await page.locator("#billingAdministrativeArea").is_visible():
-                await page.locator("#billingAdministrativeArea").select_option(b_state)
-            if await page.locator("#billingPostalCode").is_visible():
-                await page.locator("#billingPostalCode").fill(b_zip)
+            line1_loc = page.locator("#billingAddressLine1")
+            if await line1_loc.is_visible() and not (await line1_loc.is_disabled()):
+                await line1_loc.fill(b_line1)
+            city_loc = page.locator("#billingLocality")
+            if await city_loc.is_visible() and not (await city_loc.is_disabled()):
+                await city_loc.fill(b_city)
+            state_loc = page.locator("#billingAdministrativeArea")
+            if await state_loc.is_visible() and not (await state_loc.is_disabled()):
+                await state_loc.select_option(b_state)
+            zip_loc = page.locator("#billingPostalCode")
+            if await zip_loc.is_visible() and not (await zip_loc.is_disabled()):
+                await zip_loc.fill(b_zip)
             await asyncio.sleep(1.5)
 
             # 4. 自动勾选服务条款复选框 (#termsOfServiceConsentCheckbox)
@@ -592,32 +599,47 @@ class PaymentManager:
                     await tos_loc.check(force=True)
                     await asyncio.sleep(0.4)
 
+            # 等待被动人机令牌计算完全收尾，避免提交过早触发人机质询
+            logger.info("等待 Stripe HSW 签名与人机令牌就绪...")
+            await asyncio.sleep(3.5)
+
             # 5. 点击提交按钮触发 /v1/payment_methods 与 /confirm 协议请求
             submit_btn = page.locator('button[type="submit"], .SubmitButton').first
             logger.info("协议步骤 [4/4]: 正在携带原生 HSW 签名提交 /confirm 协议结算...")
             await submit_btn.click()
 
-            # 6. 等待协议响应结果（同时自动监控可能弹出的 hCaptcha 复选框）
-            for _ in range(35):
+            # 6. 等待协议响应结果（同时监控并单次点击可能出现的 hCaptcha 复选框）
+            hcaptcha_clicked = False
+            for _ in range(45):
                 if confirm_future.done():
                     break
                 # 若页面已跳转回 chatgpt.com 则说明支付成功
                 if "chatgpt.com" in page.url and "checkout" not in page.url:
                     confirm_future.set_result({"ok": True, "success_url": page.url})
                     break
-                # 检查是否有可见的 hCaptcha 复选框并自动单次点击
-                for f in page.frames:
-                    if "hcaptcha.com" in f.url and "checkbox" in f.url:
-                        try:
-                            cb = f.locator("#checkbox")
-                            if await cb.is_visible(timeout=200):
-                                if (await cb.get_attribute("aria-checked")) != "true":
-                                    box = await cb.bounding_box()
-                                    if box:
-                                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                                        await asyncio.sleep(2.0)
-                        except Exception:
-                            pass
+
+                # 检查是否有弹出可见的 hCaptcha 复选框，仅单次点击避免打断认证旋转
+                if not hcaptcha_clicked:
+                    for f in page.frames:
+                        f_url = f.url or ""
+                        if "hcaptcha.com" in f_url and "invisible" not in f_url:
+                            try:
+                                cb = f.locator("#checkbox")
+                                if await cb.is_visible():
+                                    chk = await cb.get_attribute("aria-checked")
+                                    if chk != "true":
+                                        box = await cb.bounding_box()
+                                        if box:
+                                            logger.info("检测到 Stripe hCaptcha 验证框，正在模拟点击 [I am human]...")
+                                            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=10)
+                                            await asyncio.sleep(0.1)
+                                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                            hcaptcha_clicked = True
+                                            logger.info("已点击 [I am human] 复选框，静默等待验证通过或实时画面拼图...")
+                                            await asyncio.sleep(3.0)
+                                            break
+                            except Exception:
+                                pass
                 await asyncio.sleep(1.0)
 
             if confirm_future.done():

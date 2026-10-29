@@ -45,19 +45,21 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/api/screenshot")
 async def get_live_screenshot():
-    """实时捕获当前浏览器画面 (Linux Xvfb 优先使用 scrot，macOS/本地自动回退 Playwright 原生截图)"""
+    """实时捕获当前浏览器画面 (Linux Xvfb 优先使用 scrot 原子写，macOS/本地自动回退 Playwright 原生截图)"""
     screen_path = STATIC_DIR / "live_screen.png"
+    tmp_path = STATIC_DIR / "live_screen_tmp.png"
     headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
 
-    # 1. Linux 容器 Xvfb 环境优先使用 scrot 截取完整屏幕
+    # 1. Linux 容器 Xvfb 环境优先使用 scrot 截取完整屏幕 (先写临时文件再原子重命名，避免截断导致 ASGI 读流异常)
     if os.environ.get("DISPLAY") and shutil.which("scrot"):
         try:
             res = subprocess.run(
-                ["scrot", "-o", str(screen_path)],
+                ["scrot", "-o", str(tmp_path)],
                 env=dict(os.environ, DISPLAY=os.environ.get("DISPLAY", ":99")),
                 timeout=3,
             )
-            if res.returncode == 0 and screen_path.exists():
+            if res.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 1000:
+                os.replace(tmp_path, screen_path)
                 return FileResponse(str(screen_path), media_type="image/png", headers=headers)
         except Exception as e:
             logger.debug(f"scrot 截图未就绪，尝试回退 Playwright 原生截图: {e}")
@@ -66,8 +68,9 @@ async def get_live_screenshot():
     active_page = get_active_browser_page()
     if active_page:
         try:
-            await active_page.screenshot(path=str(screen_path))
-            if screen_path.exists():
+            await active_page.screenshot(path=str(tmp_path))
+            if tmp_path.exists() and tmp_path.stat().st_size > 1000:
+                os.replace(tmp_path, screen_path)
                 return FileResponse(str(screen_path), media_type="image/png", headers=headers)
         except Exception as e:
             logger.error(f"Playwright 实时页面截图失败: {e}")
@@ -96,19 +99,15 @@ async def post_screen_action(payload: ScreenActionPayload):
             if payload.action == "drag" and payload.to_x is not None and payload.to_y is not None:
                 tx = max(0, min(1920, int(payload.to_x)))
                 ty = max(0, min(1080, int(payload.to_y)))
-                subprocess.run(
-                    [
-                        "xdotool",
-                        "mousemove", str(x), str(y),
-                        "mousedown", "1",
-                        "mousemove", "--sync", str(tx), str(ty),
-                        "sleep", "0.15",
-                        "mouseup", "1",
-                    ],
-                    env=env,
-                    timeout=5,
-                    check=True,
-                )
+                # 平滑步进拖拽 (多步插值，使 HTML5 Canvas 拼图与滑动验证码准确捕获 pointermove 事件)
+                steps = 16
+                cmd = ["xdotool", "mousemove", str(x), str(y), "mousedown", "1"]
+                for i in range(1, steps + 1):
+                    ix = int(x + (tx - x) * (i / steps))
+                    iy = int(y + (ty - y) * (i / steps))
+                    cmd.extend(["mousemove", str(ix), str(iy), "sleep", "0.015"])
+                cmd.extend(["mouseup", "1"])
+                subprocess.run(cmd, env=env, timeout=6, check=True)
             else:
                 subprocess.run(
                     ["xdotool", "mousemove", str(x), str(y), "click", "1"],
