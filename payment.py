@@ -434,36 +434,54 @@ class PaymentManager:
         browser = None
         ctx = None
         page = None
+        temp_pay_profile = Path(__file__).parent / "browser_profiles" / f"stripe_pay_{uuid.uuid4().hex[:8]}"
         confirm_future = asyncio.get_running_loop().create_future()
         logged_tax = False
 
         try:
             has_xvfb = bool(os.environ.get("DISPLAY"))
             win_w, win_h = (1920, 1080) if has_xvfb else (1280, 800)
-            launch_opts: Dict[str, Any] = {
-                "headless": False if has_xvfb else settings.headless,
+            
+            # 检测并加载 YesCaptcha 自动打码扩展
+            ext_dir = Path(__file__).parent / "extensions" / "yescaptcha"
+            has_ext = ext_dir.exists() and (ext_dir / "manifest.json").exists()
+
+            launch_args = [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--disable-save-password-bubble",
+                "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
+                f"--window-size={win_w},{win_h}",
+                "--window-position=0,0",
+                "--password-store=basic",
+            ]
+            if has_ext:
+                launch_args.append(f"--disable-extensions-except={ext_dir}")
+                launch_args.append(f"--load-extension={ext_dir}")
+                logger.info("🛡️ Stripe 支付流程已挂载 YesCaptcha 自动打码扩展，将全自动攻克 Arkose 拼图与人机质询！")
+
+            is_headless = False
+            if not has_xvfb and (settings.headless or sys.platform.startswith("linux")):
+                launch_args.append("--headless=new")
+
+            launch_kwargs: Dict[str, Any] = {
+                "user_data_dir": str(temp_pay_profile),
+                "headless": is_headless,
                 "proxy": pay_proxy_dict,
-                "args": [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--disable-save-password-bubble",
-                    "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
-                    f"--window-size={win_w},{win_h}",
-                    "--window-position=0,0",
-                ],
+                "args": launch_args,
+                "ignore_default_args": ["--enable-automation", "--disable-extensions"],
+                "viewport": {"width": win_w, "height": win_h},
+                "locale": "en-US",
+                "timezone_id": "America/New_York",
             }
             if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
-                launch_opts["channel"] = "chrome"
+                launch_kwargs["channel"] = "chrome"
 
-            browser = await p.chromium.launch(**launch_opts)
-            ctx = await browser.new_context(
-                viewport={"width": win_w, "height": win_h},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            page = await ctx.new_page()
+            temp_pay_profile.mkdir(parents=True, exist_ok=True)
+            ctx = await p.chromium.launch_persistent_context(**launch_kwargs)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             set_active_browser_page(page)
 
             async def on_stripe_response(resp):
@@ -690,15 +708,17 @@ class PaymentManager:
                     except Exception:
                         pass
 
-                if is_arkose and not challenge_alerted:
-                    challenge_alerted = True
-                    logger.warning("=" * 70)
-                    logger.warning("🔔 【检测到 Stripe 弹出 Arkose 人机验证拼图】(云端机房 IP 触发反欺诈风控)")
-                    logger.warning(f"👉 【方案 1 · 强烈推荐·免拼图秒过】: 复制上方支付长链在【手机浏览器 (建议用手机 4G/5G 流量)】打开支付！")
-                    logger.warning("   手机真实移动网络 100% 免除拼图人机直接扣款，支付后系统将自动秒级感知并继续流程！")
-                    logger.warning("👉 【方案 2 · 在线手动拼图】: 在控制台上方【实时浏览器画面】中直接点击两条线交叉重叠的圆圈格子！")
-                    logger.warning(f"   已为您保持窗口活跃并将等待时间延长至 180 秒（在此期间任一途径支付成功均会自动继续）")
-                    logger.warning("=" * 70)
+                if is_arkose:
+                    if not challenge_alerted:
+                        challenge_alerted = True
+                        logger.warning("=" * 70)
+                        logger.warning("🔔 【检测到 Stripe 弹出 Arkose 人机验证拼图】")
+                        logger.info("🤖 已由 YesCaptcha 打码插件自动接管：正在调用 AI 视觉模型分析并自动点击答案...")
+                        logger.info("💡 提示：您也可以在 Web 控制台【实时画面】辅助点击，或复制支付长链用手机 4G/5G 秒付")
+                        logger.warning("=" * 70)
+                elif challenge_alerted and not is_arkose:
+                    logger.success("✨ 【YesCaptcha 拼图攻克完成】Arkose 质询弹窗已消除，等待 Stripe 结算确认...")
+                    challenge_alerted = False
 
                 # 5. 检查是否有弹出可见的 hCaptcha 复选框
                 if not hcaptcha_clicked:
@@ -754,5 +774,10 @@ class PaymentManager:
             if browser:
                 try:
                     await browser.close()
+                except Exception:
+                    pass
+            if temp_pay_profile and temp_pay_profile.exists():
+                try:
+                    shutil.rmtree(temp_pay_profile, ignore_errors=True)
                 except Exception:
                     pass

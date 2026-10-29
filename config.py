@@ -226,9 +226,17 @@ class Settings(BaseModel):
     children_raw: str = Field(default_factory=lambda: os.getenv("CHILDREN_RAW", ""))
     children: List[AccountConfig] = Field(default_factory=list)
     card: CardConfig = Field(default_factory=CardConfig)
+    yescaptcha_key: str = Field(default_factory=lambda: os.getenv("YESCAPTCHA_KEY", "7ec6a48c8cfe76f4f1b52c0b569cc078b43f1a0d136129"))
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
+        # 自动同步 YesCaptcha 打码插件配置
+        try:
+            from captcha_solver import sync_yescaptcha_extension
+            if self.yescaptcha_key:
+                sync_yescaptcha_extension(self.yescaptcha_key)
+        except Exception:
+            pass
         # 初始化解析 children 列表
         if self.children_raw and self.children_raw.strip():
             parsed = parse_accounts_text(self.children_raw)

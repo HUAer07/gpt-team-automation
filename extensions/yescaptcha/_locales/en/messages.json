@@ -1,0 +1,536 @@
+{
+	"name": {
+		"message": "YesCaptcha assistant"
+	},
+	"pluginDesc": {
+		"message": "captcha assistant"
+	},
+	"popup_header_title": {
+		"message": "YesCaptcha assistant"
+	},
+	"popup_header_balance_error": {
+		"message": "error"
+	},
+	"popup_balance": {
+		"message": "Balance"
+	},
+	"popup_panel_title": {
+		"message": "Setting Panel"
+	},
+	"popup_panel_key": {
+		"message": "key"
+	},
+	"popup_panel_address": {
+		"message": "node"
+	},
+	"popup_panel_click_speed": {
+		"message": "click speed"
+	},
+	"popup_panel_click_speed_tool_tip": {
+		"message": "The interval between clicking images, in milliseconds"
+	},
+	"popup_panel_click_speed_helptext": {
+		"message": "Less than 200ms may fail to identify (hCaptcha)"
+	},
+	"popup_panel_end_times": {
+		"message": "Times limit"
+	},
+	"popup_panel_end_times_tooltip": {
+		"message": "Stop after N recognitions. Off = unlimited. Shows 'Limit exceeded' when stopped."
+	},
+	"popup_panel_check_box": {
+		"message": "Auto-open"
+	},
+	"popup_panel_check_box_tooltip": {
+		"message": "Whether to click the check box, the value is the click delay (ms)"
+	},
+	"popup_panel_save": {
+		"message": "save"
+	},
+	"popup_switch_title": {
+		"message": "Switch"
+	},
+	"popup_switch_label_1": {
+		"message": "reCaptcha(click)"
+	},
+	"popup_switch_label_1_new_version": {
+		"message": "new script"
+	},
+	"popup_switch_label_1_old_version": {
+		"message": "old script"
+	},
+	"popup_switch_label_2": {
+		"message": "hCaptcha"
+	},
+	"popup_switch_label_3": {
+		"message": "coinlist words"
+	},
+	"popup_switch_label_4": {
+		"message": "coinlist pink button"
+	},
+	"popup_switch_label_5": {
+		"message": "Text verification code"
+	},
+	"popup_switch_label_6": {
+		"message": "Cloudflare"
+	},
+	"popup_switch_label_7": {
+		"message": "Funcaptcha"
+	},
+	"popup_alert_network": {
+		"message": "network error, please check your network"
+	},
+	"popup_advanced_setting": {
+		"message": "advanced setting"
+	},
+	"content_message_0": {
+		"message": "Please fill in ClientKey first"
+	},
+	"content_message_1": {
+		"message": "Insufficient balance"
+	},
+	"content_message_2": {
+		"message": "Automatic recognition has been activated"
+	},
+	"content_message_3": {
+		"message": "Recognizing..."
+	},
+	"content_message_4": {
+		"message": "Automatic recognition completed"
+	},
+	"content_message_5": {
+		"message": "Submitting image for recognition..."
+	},
+	"content_message_6": {
+		"message": "Auto-clicking..."
+	},
+	"content_message_7": {
+		"message": "Auto-recognition: clicking submit"
+	},
+	"content_message_8": {
+		"message": "Verification failed"
+	},
+	"content_message_9": {
+		"message": "network error"
+	},
+	"content_message_10": {
+		"message": "Single recognition limit exceeded"
+	},
+	"content_message_11": {
+		"message": "Exceeded the limit (xxx times).You can modify it in settings."
+	},
+	"content_message_12": {
+		"message": "YesCaptcha repeated installation"
+	},
+	"context_menu_1": {
+		"message": "Mark as captcha source"
+	},
+	"context_menu_2": {
+		"message": "Put captcha answer here"
+	},
+	"popup_add_fund": {
+		"message": "recharge"
+	},
+	"popup_register": {
+		"message": "register"
+	},
+	"popup_newVersionNotice": {
+		"message": "has new version"
+	},
+	"popup_footer_privacy": {
+		"message": "privacy policy"
+	},
+	"option_general_navword": {
+		"message": "general"
+	},
+	"option_general_ms": {
+		"message": "main switch"
+	},
+	"option_general_clientKey": {
+		"message": "clientKey"
+	},
+	"option_general_host": {
+		"message": "host"
+	},
+	"option_general_cp": {
+		"message": "click speed"
+	},
+	"option_general_tl": {
+		"message": "Times limit"
+	},
+	"option_general_istl": {
+		"message": "isOpenTimesLimit"
+	},
+	"option_general_istl_tooltip": {
+		"message": "After the plugin executes CAPTCHA and passes the verification, if the user takes a long time to proceed to the next step, CAPTCHA may be reset and need to be re-identified. Turning on this setting will record the number of re-identifications and stop after the set number of times is exceeded."
+	},
+	"option_general_iscb": {
+		"message": "is Auto-open"
+	},
+	"option_general_cbdl": {
+		"message": "Auto-open delay"
+	},
+	"option_general_atsm": {
+		"message": "is Auto-Submit"
+	},
+	"option_general_atsm_tooltip": {
+		"message": "After a single challenge is executed, the plug-in will automatically click the next step (for example, after a single hcaptcha nine-square recognition click, it will automatically click the check button)"
+	},
+	"option_isopen": {
+		"message": "is Open"
+	},
+	"option_isTransToUppercase": {
+		"message": "isTransToUppercase"
+	},
+	"option_isCalculate": {
+		"message": "isCalculate"
+	},
+	"option_recaptcha_title": {
+		"message": "recaptcha config"
+	},
+	"option_recaptcha_invisible": {
+		"message": "adapt invisible"
+	},
+	"option_recaptcha_protocol": {
+		"message": "reCaptcha(protocol beta)"
+	},
+	"option_recaptcha_tooltip1": {
+		"message": "simulated click"
+	},
+	"option_recaptcha_tooltip2": {
+		"message": "The protocol and simulated clicks are mutually exclusive; simulated clicks take precedence."
+	},
+	"option_general_workStatusFlag": {
+		"message": "workStatus flag"
+	},
+	"option_general_jsControlObjectName": {
+		"message": "jsControl ObjectName"
+	},
+	"option_general_inject_js": {
+		"message": "js injection"
+	},
+	"option_recaptcha_isOpenClick": {
+		"message": "reCaptcha(click)"
+	},
+	"option_recaptcha_nsc": {
+		"message": "use newScript"
+	},
+	"option_recaptcha_1x1dealy": {
+		"message": "singleImage fade-in delay"
+	},
+	"option_network_title": {
+		"message": "network config"
+	},
+	"option_network_hd": {
+		"message": "hcaptcha request delay(ms)"
+	},
+	"option_network_ht": {
+		"message": "hcaptcha request try"
+	},
+	"option_network_rd": {
+		"message": "reCaptcha request delay(ms)"
+	},
+	"option_network_rt": {
+		"message": "reCaptcha request try"
+	},
+	"option_network_fd": {
+		"message": "funcaptcha request delay(ms)"
+	},
+	"option_network_ft": {
+		"message": "funcaptcha request try"
+	},
+	"option_hcaptcha_title": {
+		"message": "hcaptcha config"
+	},
+	"option_hcaptcha_iorl": {
+		"message": "isOpenRecognitionLimit"
+	},
+	"option_hcaptcha_iorl_tooltip": {
+		"message": "This number refers to the number of single challenges (such as a single hcaptcha nine-square recognition). The plug-in will record the number of recognitions for this page and stop recognition after exceeding the set number of times."
+	},
+	"option_hcaptcha_rmt": {
+		"message": "recognitionMaxTimes"
+	},
+	"option_hcaptcha_isrefresh": {
+		"message": "failRefresh"
+	},
+	"option_hcaptcha_isPassDragChallenge": {
+		"message": "isPassDragChallenge"
+	},
+	"option_hcaptcha_isSwitchToEnglishContent": {
+		"message": "Switch Captcha to English"
+	},
+	"option_hcaptcha_isPassMoveCanvas": {
+		"message": "isPassMovingCanvasChallenge"
+	},
+	"option_hcaptcha_canvasRecordDuration": {
+		"message": "Canvas GIF Record Duration (ms)"
+	},
+	"option_hcaptcha_isRealClick": {
+		"message": "Use real click (isTrusted)"
+	},
+	"option_hcaptcha_isRealClick_tooltip": {
+		"message": "When enabled, the hCaptcha checkbox, grid selection, submit button and canvas drag/box challenges use trusted input via chrome.debugger (isTrusted=true), falling back to synthetic events on failure; the store build has no debugger permission and always uses synthetic events"
+	},
+	"option_hcaptcha_aarmt": {
+		"message": "actionAfterRecognitionMaxTimes"
+	},
+	"option_funcaptcha_title": {
+		"message": "funcaptcha config"
+	},
+	"option_funcaptcha_aars": {
+		"message": "actionAfterRecSuccess"
+	},
+	"option_funcaptcha_aaorf": {
+		"message": "actionAfterOneRecFail"
+	},
+	"option_funcaptcha_aarf": {
+		"message": "actionAfterRecFail"
+	},
+	"option_funcaptcha_ad": {
+		"message": "actionDelay"
+	},
+	"option_funcaptcha_isRealClick": {
+		"message": "Use real click (isTrusted)"
+	},
+	"option_funcaptcha_isRealClick_tooltip": {
+		"message": "When enabled, prefer trusted input via chrome.debugger (isTrusted=true), falling back to synthetic events on failure; when disabled, use synthetic events directly"
+	},
+	"option_cloudflare_title": {
+		"message": "cloudflare config"
+	},
+	"option_cloudflare_turnstile_title": {
+		"message": "cloudflare turnstile config"
+	},
+	"option_cloudflare_turnstile_protocol": {
+		"message": "Turnstile protocol"
+	},
+	"option_textcaptcha_title": {
+		"message": "textcaptcha config"
+	},
+	"option_submit_delay_time": {
+		"message": "submitDelayTime"
+	},
+	"option_submit_delay_float_rate": {
+		"message": "submitDelayFloatRate"
+	},
+	"option_nav_general": {
+		"message": "General"
+	},
+	"option_nav_recaptcha": {
+		"message": "reCaptcha"
+	},
+	"option_nav_funcaptcha": {
+		"message": "FunCaptcha"
+	},
+	"option_nav_hcaptcha": {
+		"message": "hCaptcha"
+	},
+	"option_nav_network": {
+		"message": "Network & retry"
+	},
+	"option_nav_textcaptcha": {
+		"message": "Text captcha"
+	},
+	"option_nav_cloudflare": {
+		"message": "Cloudflare"
+	},
+	"option_nav_cloudflare_turnstile": {
+		"message": "Cloudflare Turnstile"
+	},
+	"option_nav_awscaptcha": {
+		"message": "AWS WAF Captcha"
+	},
+	"option_page_title": {
+		"message": "YesCaptcha Settings"
+	},
+	"option_awscaptcha_title": {
+		"message": "awsCaptcha config"
+	},
+	"option_section_basic": {
+		"message": "Basic"
+	},
+	"option_section_limit": {
+		"message": "Attempt limit"
+	},
+	"option_section_autoclick": {
+		"message": "Auto click"
+	},
+	"option_section_autosubmit": {
+		"message": "Auto submit"
+	},
+	"option_section_inject": {
+		"message": "JS injection"
+	},
+	"option_section_click": {
+		"message": "Click mode"
+	},
+	"option_section_protocol": {
+		"message": "Protocol mode"
+	},
+	"option_section_challenge": {
+		"message": "Challenge handling"
+	},
+	"option_section_action": {
+		"message": "Action after recognition"
+	},
+	"option_section_storage": {
+		"message": "Local data"
+	},
+	"option_unit_ms": {
+		"message": "ms"
+	},
+	"option_unit_times": {
+		"message": "times"
+	},
+	"option_common_save": {
+		"message": "Save"
+	},
+	"option_common_reset": {
+		"message": "Discard changes"
+	},
+	"option_common_reset_done": {
+		"message": "Changes discarded"
+	},
+	"option_common_saved": {
+		"message": "Saved"
+	},
+	"option_common_unsaved": {
+		"message": "Unsaved changes"
+	},
+	"option_common_invalid_number": {
+		"message": "Please enter a valid number"
+	},
+	"option_common_invalid_hint": {
+		"message": "Some settings are invalid. Fix them before saving."
+	},
+	"option_common_net_fail": {
+		"message": "Server address check failed, not saved"
+	},
+	"option_common_show_key": {
+		"message": "Show key"
+	},
+	"option_common_hide_key": {
+		"message": "Hide key"
+	},
+	"option_common_clear_crx_storage": {
+		"message": "Clear stored data"
+	},
+	"option_common_clear_confirm_title": {
+		"message": "Confirm clear"
+	},
+	"option_common_clear_confirm_content": {
+		"message": "This deletes the page recognition data (hostStore) saved locally. This cannot be undone."
+	},
+	"option_common_cleared": {
+		"message": "Cleared"
+	},
+	"option_common_confirm": {
+		"message": "Confirm"
+	},
+	"option_common_cancel": {
+		"message": "Cancel"
+	},
+	"option_nav_blackwhitelist": {
+		"message": "Allow / block list"
+	},
+	"option_bwl_title": {
+		"message": "Allow / block list"
+	},
+	"option_bwl_alert": {
+		"message": "This page decides which pages the extension runs on. Reload the target page for changes to take effect. When the master switch on the General page is off, these settings are not read and the extension runs nowhere."
+	},
+	"option_section_bwl_whitelist": {
+		"message": "Allow list"
+	},
+	"option_section_bwl_blacklist": {
+		"message": "Block list"
+	},
+	"option_section_bwl_order": {
+		"message": "Evaluation order"
+	},
+	"option_section_bwl_match": {
+		"message": "Matching rules"
+	},
+	"option_section_bwl_timing": {
+		"message": "When it takes effect"
+	},
+	"option_bwl_isOpen_white": {
+		"message": "Enable allow list"
+	},
+	"option_bwl_white_tooltip": {
+		"message": "When on, the extension runs only on URLs matching the rules below."
+	},
+	"option_bwl_isOpen_black": {
+		"message": "Enable block list"
+	},
+	"option_bwl_black_tooltip": {
+		"message": "When on, URLs matching the rules below are skipped."
+	},
+	"option_bwl_list_label": {
+		"message": "URL rules"
+	},
+	"option_bwl_list_empty": {
+		"message": "No rules yet. Use the button below to add one."
+	},
+	"option_bwl_list_add": {
+		"message": "Add rule"
+	},
+	"option_bwl_list_delete": {
+		"message": "Delete rule"
+	},
+	"option_bwl_rule_placeholder": {
+		"message": "example.com"
+	},
+	"option_bwl_rule_empty": {
+		"message": "Rule cannot be empty"
+	},
+	"option_bwl_rule_invalid_regex": {
+		"message": "Invalid regular expression"
+	},
+	"option_bwl_order_1": {
+		"message": "The allow list takes priority: while it is on, the block list is ignored entirely."
+	},
+	"option_bwl_order_2": {
+		"message": "Allow list on: only pages matching it run; every other page is skipped."
+	},
+	"option_bwl_order_3": {
+		"message": "Allow list off, block list on: pages matching the block list are skipped, the rest run normally."
+	},
+	"option_bwl_order_4": {
+		"message": "Both off: no restriction at all, every page runs."
+	},
+	"option_bwl_match_1": {
+		"message": "Matching uses the tab's top-level URL, not the iframe URL. Frames of the same tab all use that same URL."
+	},
+	"option_bwl_match_2": {
+		"message": "Plain text is matched as a substring, so a domain, a path or any fragment works."
+	},
+	"option_bwl_example_1": {
+		"message": "example.com"
+	},
+	"option_bwl_example_1_desc": {
+		"message": "Matches every URL containing that text, for example https://example.com/login or https://api.example.com/."
+	},
+	"option_bwl_match_3": {
+		"message": "Text wrapped in two slashes is treated as a regular expression."
+	},
+	"option_bwl_example_2": {
+		"message": "/^https:\\/\\/example\\.com\\//"
+	},
+	"option_bwl_example_2_desc": {
+		"message": "Matches only https URLs starting with https://example.com/."
+	},
+	"option_bwl_match_4": {
+		"message": "If any rule in the list matches, the list counts as matched."
+	},
+	"option_bwl_match_5": {
+		"message": "An empty rule would match every URL, so empty rules cannot be saved."
+	},
+	"option_bwl_timing_1": {
+		"message": "The config is read once per page load (document_end), so the page must be reloaded after a change."
+	},
+	"option_bwl_timing_2": {
+		"message": "With the master switch off this check is skipped and the extension runs nowhere."
+	}
+}

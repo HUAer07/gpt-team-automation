@@ -347,6 +347,29 @@
             <input type="range" id="step_delay_seconds" min="5" max="60" value="15" oninput="document.getElementById('delay_label').innerText = this.value + ' 秒'" class="w-full accent-brand-500">
           </div>
 
+          <!-- YesCaptcha 自动打码平台 -->
+          <div class="border-t border-slate-800/80 pt-3.5 space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="block text-xs font-semibold text-cyan-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-robot text-cyan-400"></i> YesCaptcha 自动打码 (过 Arkose/Turnstile)
+              </label>
+              <span id="yescaptcha_badge" class="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-800 flex items-center gap-1 font-mono">
+                <span class="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                <span id="yescaptcha_balance_text">正在检测...</span>
+              </span>
+            </div>
+            <div class="flex gap-2">
+              <input type="password" id="yescaptcha_key" placeholder="填入 YesCaptcha ClientKey" class="flex-1 bg-dark-950 border border-cyan-500/30 rounded-xl px-3 py-1.5 text-xs text-cyan-100 focus:outline-none focus:border-cyan-400 font-mono transition">
+              <button type="button" onclick="testYesCaptcha()" class="px-3 py-1.5 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-700/60 rounded-xl text-xs font-medium transition flex items-center gap-1">
+                <i class="fa-solid fa-plug text-[10px]"></i>
+                <span>测连</span>
+              </button>
+            </div>
+            <p class="text-[10px] text-slate-500 leading-relaxed">
+              <span class="text-emerald-400 font-medium">● 已接管：</span>Stripe Arkose 重叠线拼图、Cloudflare Turnstile、hCaptcha 全自动识破。
+            </p>
+          </div>
+
           <button onclick="saveConfig()" class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold py-2.5 rounded-xl transition flex items-center justify-center space-x-2 text-sm shadow">
             <i class="fa-solid fa-floppy-disk"></i>
             <span>保存配置并应用</span>
@@ -919,6 +942,8 @@
         document.getElementById('billing_city').value = data.billing_city || 'Wilmington';
         document.getElementById('billing_state').value = data.billing_state || 'DE';
         document.getElementById('billing_zip').value = data.billing_zip || '19801';
+        document.getElementById('yescaptcha_key').value = data.yescaptcha_key || '';
+        checkYesCaptchaStatus(data.yescaptcha_key);
 
       } catch (err) {
         appendLog('error', '获取初始配置失败: ' + err.message);
@@ -984,6 +1009,7 @@
         billing_city: document.getElementById('billing_city').value.trim(),
         billing_state: document.getElementById('billing_state').value.trim(),
         billing_zip: document.getElementById('billing_zip').value.trim(),
+        yescaptcha_key: document.getElementById('yescaptcha_key').value.trim(),
       };
 
       try {
@@ -1002,6 +1028,58 @@
           alert('保存失败: ' + e.message);
         }
         return false;
+      }
+    }
+
+    async function checkYesCaptchaStatus(keyOverride) {
+      const badge = document.getElementById('yescaptcha_badge');
+      const text = document.getElementById('yescaptcha_balance_text');
+      if (!badge || !text) return;
+      try {
+        const key = keyOverride || (document.getElementById('yescaptcha_key') ? document.getElementById('yescaptcha_key').value.trim() : '');
+        const res = await fetch('/api/yescaptcha/test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ key })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          text.innerText = '余点: ' + (data.balance || 0);
+          badge.className = 'text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center gap-1 font-mono';
+        } else {
+          text.innerText = data.error ? '异常' : '未连接';
+          badge.className = 'text-[10px] px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-800 flex items-center gap-1 font-mono';
+        }
+      } catch (e) {
+        text.innerText = '离线';
+      }
+    }
+
+    async function testYesCaptcha() {
+      const keyInput = document.getElementById('yescaptcha_key');
+      const key = keyInput ? keyInput.value.trim() : '';
+      if (!key) {
+        alert('请先输入 YesCaptcha ClientKey');
+        return;
+      }
+      const text = document.getElementById('yescaptcha_balance_text');
+      if (text) text.innerText = '测试中...';
+      try {
+        const res = await fetch('/api/yescaptcha/test', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ key })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          alert('✅ YesCaptcha 验证成功！当前可用点数: ' + data.balance);
+          checkYesCaptchaStatus(key);
+        } else {
+          alert('❌ YesCaptcha 验证失败: ' + (data.error || '未知错误'));
+          checkYesCaptchaStatus(key);
+        }
+      } catch (err) {
+        alert('❌ 请求 YesCaptcha 接口超时或异常: ' + err.message);
       }
     }
 

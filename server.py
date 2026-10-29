@@ -227,9 +227,25 @@ class ConfigPayload(BaseModel):
     billing_city: Optional[str] = "Wilmington"
     billing_state: Optional[str] = "DE"
     billing_zip: Optional[str] = "19801"
+    yescaptcha_key: Optional[str] = "7ec6a48c8cfe76f4f1b52c0b569cc078b43f1a0d136129"
 
 class TotpVerifyPayload(BaseModel):
     secret: str
+
+class YesCaptchaTestPayload(BaseModel):
+    key: Optional[str] = None
+
+@app.get("/api/yescaptcha/status")
+async def get_yescaptcha_status():
+    from captcha_solver import get_yescaptcha_balance
+    yk = getattr(settings, "yescaptcha_key", "")
+    return get_yescaptcha_balance(yk)
+
+@app.post("/api/yescaptcha/test")
+async def test_yescaptcha_key(payload: YesCaptchaTestPayload):
+    from captcha_solver import get_yescaptcha_balance
+    yk = payload.key or getattr(settings, "yescaptcha_key", "")
+    return get_yescaptcha_balance(yk)
 
 @app.get("/")
 async def index():
@@ -292,6 +308,7 @@ async def get_config():
         "billing_city": env_vals.get("BILLING_CITY", settings.card.billing_city),
         "billing_state": env_vals.get("BILLING_STATE", settings.card.billing_state),
         "billing_zip": env_vals.get("BILLING_ZIP", settings.card.billing_zip),
+        "yescaptcha_key": env_vals.get("YESCAPTCHA_KEY", getattr(settings, "yescaptcha_key", "7ec6a48c8cfe76f4f1b52c0b569cc078b43f1a0d136129")),
     }
 
 @app.post("/api/config")
@@ -361,6 +378,15 @@ async def update_config(payload: ConfigPayload):
     set_key(str(ENV_FILE), "BILLING_CITY", payload.billing_city or "Wilmington")
     set_key(str(ENV_FILE), "BILLING_STATE", payload.billing_state or "DE")
     set_key(str(ENV_FILE), "BILLING_ZIP", payload.billing_zip or "19801")
+    if payload.yescaptcha_key is not None:
+        clean_yk = payload.yescaptcha_key.strip()
+        set_key(str(ENV_FILE), "YESCAPTCHA_KEY", clean_yk)
+        settings.yescaptcha_key = clean_yk
+        try:
+            from captcha_solver import sync_yescaptcha_extension
+            sync_yescaptcha_extension(clean_yk)
+        except Exception:
+            pass
 
     # 热重载全局 settings
     settings.master.email = payload.master_email

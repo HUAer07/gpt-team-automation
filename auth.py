@@ -268,11 +268,18 @@ class Authenticator:
         else:
             is_headless = False
 
+        # 挂载 YesCaptcha 打码插件 (智能攻克 Arkose 拼图、Cloudflare Turnstile 与 hCaptcha)
+        ext_dir = Path(__file__).parent / "extensions" / "yescaptcha"
+        if ext_dir.exists() and (ext_dir / "manifest.json").exists():
+            args.append(f"--disable-extensions-except={ext_dir}")
+            args.append(f"--load-extension={ext_dir}")
+            logger.info("🛡️ 已自动挂载 YesCaptcha 自动打码插件 (支持 Arkose 拼图 / Turnstile / hCaptcha 全自动过盾)")
+
         launch_kwargs = {
             "user_data_dir": str(user_data_dir),
             "headless": is_headless,
             "args": args,
-            "ignore_default_args": ["--enable-automation"],
+            "ignore_default_args": ["--enable-automation", "--disable-extensions"],
             "proxy": proxy_dict,
             "viewport": {"width": win_w, "height": win_h},
             "locale": "en-US",

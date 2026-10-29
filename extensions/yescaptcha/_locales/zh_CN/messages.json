@@ -1,0 +1,536 @@
+{
+	"name": {
+		"message": "YesCaptcha 人机助手"
+	},
+	"pluginDesc": {
+		"message": "captcha助手"
+	},
+	"popup_header_title": {
+		"message": "YesCaptcha 人机助手"
+	},
+	"popup_header_balance_error": {
+		"message": "错误"
+	},
+	"popup_balance": {
+		"message": "余额"
+	},
+	"popup_panel_title": {
+		"message": "设置面板"
+	},
+	"popup_panel_key": {
+		"message": "密钥"
+	},
+	"popup_panel_address": {
+		"message": "节点"
+	},
+	"popup_panel_click_speed": {
+		"message": "点击速度"
+	},
+	"popup_panel_click_speed_tool_tip": {
+		"message": "点击图片的间隔时间，单位为毫秒"
+	},
+	"popup_panel_click_speed_helptext": {
+		"message": "hcaptcha低于200ms可能会识别失败"
+	},
+	"popup_panel_end_times": {
+		"message": "次数限制"
+	},
+	"popup_panel_end_times_tooltip": {
+		"message": "经过设定次数的自动识别后停止,关闭表示无限制自动识别，停止之后会提示“超过最多成功次数”"
+	},
+	"popup_panel_check_box": {
+		"message": "自动开启"
+	},
+	"popup_panel_check_box_tooltip": {
+		"message": "是否点击勾选框，数值为点击延迟(ms)"
+	},
+	"popup_panel_save": {
+		"message": "保存"
+	},
+	"popup_switch_title": {
+		"message": "开关"
+	},
+	"popup_switch_label_1": {
+		"message": "reCaptcha（模拟点击）"
+	},
+	"popup_switch_label_1_new_version": {
+		"message": "新脚本"
+	},
+	"popup_switch_label_1_old_version": {
+		"message": "旧脚本"
+	},
+	"popup_switch_label_2": {
+		"message": "hCaptcha"
+	},
+	"popup_switch_label_3": {
+		"message": "Coinlist 文字识别"
+	},
+	"popup_switch_label_4": {
+		"message": "Coinlist 按钮点击"
+	},
+	"popup_switch_label_5": {
+		"message": "文字验证码"
+	},
+	"popup_switch_label_6": {
+		"message": "Cloudflare"
+	},
+	"popup_switch_label_7": {
+		"message": "Funcaptcha"
+	},
+	"popup_advanced_setting": {
+		"message": "高级设置"
+	},
+	"popup_alert_network": {
+		"message": "网络错误，请检查网络"
+	},
+	"content_message_0": {
+		"message": "请先填写密钥ClientKey"
+	},
+	"content_message_1": {
+		"message": "余额不足"
+	},
+	"content_message_2": {
+		"message": "自动识别已经启动"
+	},
+	"content_message_3": {
+		"message": "自动识别正在识别中"
+	},
+	"content_message_4": {
+		"message": "自动识别已完成"
+	},
+	"content_message_5": {
+		"message": "自动识别提交图像接口识别中"
+	},
+	"content_message_6": {
+		"message": "自动识别自动点击中"
+	},
+	"content_message_7": {
+		"message": "自动识别点击提交"
+	},
+	"content_message_8": {
+		"message": "识别失败"
+	},
+	"content_message_9": {
+		"message": "网络错误"
+	},
+	"content_message_10": {
+		"message": "超过最多单次识别次数"
+	},
+	"content_message_11": {
+		"message": "超过设置的成功次数（xxx次）,您可以在设置里面修改。"
+	},
+	"content_message_12": {
+		"message": "YesCaptcha重复安装"
+	},
+	"context_menu_1": {
+		"message": "标记为验证码"
+	},
+	"context_menu_2": {
+		"message": "输入验证码"
+	},
+	"popup_add_fund": {
+		"message": "充值"
+	},
+	"popup_register": {
+		"message": "注册账户"
+	},
+	"popup_newVersionNotice": {
+		"message": "有新版本"
+	},
+	"popup_footer_privacy": {
+		"message": "隐私政策"
+	},
+	"option_general_navword": {
+		"message": "通用"
+	},
+	"option_general_workStatusFlag": {
+		"message": "工作状态flag"
+	},
+	"option_general_jsControlObjectName": {
+		"message": "js控制对象名"
+	},
+	"option_general_ms": {
+		"message": "总开关"
+	},
+	"option_general_clientKey": {
+		"message": "密钥"
+	},
+	"option_general_host": {
+		"message": "服务器地址"
+	},
+	"option_general_cp": {
+		"message": "点击速度"
+	},
+	"option_general_tl": {
+		"message": "次数限制"
+	},
+	"option_general_istl": {
+		"message": "开启次数限制"
+	},
+	"option_general_istl_tooltip": {
+		"message": "在插件执行captcha通过验证后，如果用户长时间未进行下一步，captcha有可能重置并需要重新识别。开启此设定会记录重新识别的次数，并在超过设定次数后停止"
+	},
+	"option_general_iscb": {
+		"message": "开启自动打开"
+	},
+	"option_general_cbdl": {
+		"message": "自动打开延迟"
+	},
+	"option_general_atsm": {
+		"message": "开启自动提交"
+	},
+	"option_general_atsm_tooltip": {
+		"message": "单次挑战执行后，插件会自动点击下一步（如hcaptcha单个九宫格识别点击之后，自动点击检查按钮）"
+	},
+	"option_general_inject_js": {
+		"message": "注入js上下文"
+	},
+	"option_isopen": {
+		"message": "开启"
+	},
+	"option_isTransToUppercase": {
+		"message": "验证结果是否转大写"
+	},
+	"option_isCalculate": {
+		"message": "计算型验证码"
+	},
+	"option_recaptcha_title": {
+		"message": "recaptcha 设置"
+	},
+	"option_recaptcha_invisible": {
+		"message": "适应invisible模式"
+	},
+	"option_recaptcha_isOpenClick": {
+		"message": "reCaptcha(模拟点击)"
+	},
+	"option_recaptcha_nsc": {
+		"message": "新脚本"
+	},
+	"option_recaptcha_1x1dealy": {
+		"message": "单图淡入延迟"
+	},
+	"option_recaptcha_protocol": {
+		"message": "reCaptcha(协议beta)"
+	},
+	"option_recaptcha_tooltip1": {
+		"message": "模拟点击开关"
+	},
+	"option_recaptcha_tooltip2": {
+		"message": "协议和模拟点击互斥，优先模拟点击"
+	},
+	"option_network_title": {
+		"message": "network 设置"
+	},
+	"option_network_hd": {
+		"message": "hcaptcha请求延迟(ms)"
+	},
+	"option_network_ht": {
+		"message": "hcaptcha请求重试次数"
+	},
+	"option_network_rd": {
+		"message": "reCaptcha请求延迟(ms)"
+	},
+	"option_network_rt": {
+		"message": "reCaptcha请求重试次数"
+	},
+	"option_network_fd": {
+		"message": "funcaptcha请求延迟(ms)"
+	},
+	"option_network_ft": {
+		"message": "funcaptcha请求重试次数"
+	},
+	"option_hcaptcha_title": {
+		"message": "hcaptcha 设置"
+	},
+	"option_hcaptcha_isrefresh": {
+		"message": "失败刷新"
+	},
+	"option_hcaptcha_isPassDragChallenge": {
+		"message": "跳过拖动挑战"
+	},
+	"option_hcaptcha_isSwitchToEnglishContent": {
+		"message": "自动切换英文界面"
+	},
+	"option_hcaptcha_isPassMoveCanvas": {
+		"message": "跳过动图挑战"
+	},
+	"option_hcaptcha_canvasRecordDuration": {
+		"message": "动图录制时长(ms)"
+	},
+	"option_hcaptcha_isRealClick": {
+		"message": "启用真实点击"
+	},
+	"option_hcaptcha_isRealClick_tooltip": {
+		"message": "开启后 hCaptcha 的复选框、九宫格点选、提交按钮与 canvas 拖动/框选都使用 chrome.debugger 真实输入（isTrusted=true），失败时自动回退为合成事件；store 版没有 debugger 权限，始终使用合成事件"
+	},
+	"option_hcaptcha_iorl": {
+		"message": "是否开启识别限制"
+	},
+	"option_hcaptcha_iorl_tooltip": {
+		"message": "该次数指的是单次挑战的次数（如一次hcaptcha的单次九宫格挑战）。插件会记录本次页面的识别次数，并在超过设定次数后停止识别"
+	},
+	"option_hcaptcha_rmt": {
+		"message": "次数限制（单个九宫格）"
+	},
+	"option_hcaptcha_aarmt": {
+		"message": "超过后触发的逻辑"
+	},
+	"option_funcaptcha_title": {
+		"message": "funcaptcha 设置"
+	},
+	"option_funcaptcha_aars": {
+		"message": "识别成功后动作"
+	},
+	"option_funcaptcha_aaorf": {
+		"message": "单次识别失败后动作"
+	},
+	"option_funcaptcha_aarf": {
+		"message": "识别失败后动作"
+	},
+	"option_funcaptcha_ad": {
+		"message": "动作延迟"
+	},
+	"option_funcaptcha_isRealClick": {
+		"message": "启用真实点击"
+	},
+	"option_funcaptcha_isRealClick_tooltip": {
+		"message": "开启后优先使用 chrome.debugger 真实输入（isTrusted=true），失败时自动回退为合成事件；关闭后直接使用合成事件"
+	},
+	"option_cloudflare_title": {
+		"message": "cloudflare 设置"
+	},
+	"option_cloudflare_turnstile_title": {
+		"message": "cloudflare turnstile 设置"
+	},
+	"option_cloudflare_turnstile_protocol": {
+		"message": "Turnstile协议版"
+	},
+	"option_textcaptcha_title": {
+		"message": "textcaptcha 设置"
+	},
+	"option_submit_delay_time": {
+		"message": "提交延迟ms"
+	},
+	"option_submit_delay_float_rate": {
+		"message": "提交延迟浮动0~1"
+	},
+	"option_nav_general": {
+		"message": "通用"
+	},
+	"option_nav_recaptcha": {
+		"message": "reCaptcha"
+	},
+	"option_nav_funcaptcha": {
+		"message": "FunCaptcha"
+	},
+	"option_nav_hcaptcha": {
+		"message": "hCaptcha"
+	},
+	"option_nav_network": {
+		"message": "网络与重试"
+	},
+	"option_nav_textcaptcha": {
+		"message": "文字验证码"
+	},
+	"option_nav_cloudflare": {
+		"message": "Cloudflare"
+	},
+	"option_nav_cloudflare_turnstile": {
+		"message": "Cloudflare Turnstile"
+	},
+	"option_nav_awscaptcha": {
+		"message": "AWS WAF Captcha"
+	},
+	"option_page_title": {
+		"message": "YesCaptcha 设置"
+	},
+	"option_awscaptcha_title": {
+		"message": "awsCaptcha 设置"
+	},
+	"option_section_basic": {
+		"message": "基础设置"
+	},
+	"option_section_limit": {
+		"message": "次数限制"
+	},
+	"option_section_autoclick": {
+		"message": "自动点击"
+	},
+	"option_section_autosubmit": {
+		"message": "自动提交"
+	},
+	"option_section_inject": {
+		"message": "JS 注入"
+	},
+	"option_section_click": {
+		"message": "模拟点击"
+	},
+	"option_section_protocol": {
+		"message": "协议模式"
+	},
+	"option_section_challenge": {
+		"message": "挑战处理"
+	},
+	"option_section_action": {
+		"message": "识别后动作"
+	},
+	"option_section_storage": {
+		"message": "本地数据"
+	},
+	"option_unit_ms": {
+		"message": "ms"
+	},
+	"option_unit_times": {
+		"message": "次"
+	},
+	"option_common_save": {
+		"message": "保存"
+	},
+	"option_common_reset": {
+		"message": "放弃更改"
+	},
+	"option_common_reset_done": {
+		"message": "已放弃更改"
+	},
+	"option_common_saved": {
+		"message": "已保存"
+	},
+	"option_common_unsaved": {
+		"message": "有未保存的更改"
+	},
+	"option_common_invalid_number": {
+		"message": "请输入有效数字"
+	},
+	"option_common_invalid_hint": {
+		"message": "存在无效的配置项，请先修正后再保存"
+	},
+	"option_common_net_fail": {
+		"message": "服务器地址校验失败，未保存"
+	},
+	"option_common_show_key": {
+		"message": "显示密钥"
+	},
+	"option_common_hide_key": {
+		"message": "隐藏密钥"
+	},
+	"option_common_clear_crx_storage": {
+		"message": "清空已存数据"
+	},
+	"option_common_clear_confirm_title": {
+		"message": "确认清空"
+	},
+	"option_common_clear_confirm_content": {
+		"message": "将删除本地保存的页面识别数据（hostStore），此操作不可撤销。"
+	},
+	"option_common_cleared": {
+		"message": "已清空"
+	},
+	"option_common_confirm": {
+		"message": "确认"
+	},
+	"option_common_cancel": {
+		"message": "取消"
+	},
+	"option_nav_blackwhitelist": {
+		"message": "黑白名单"
+	},
+	"option_bwl_title": {
+		"message": "黑白名单"
+	},
+	"option_bwl_alert": {
+		"message": "本页决定扩展在哪些页面运行，改动后需刷新目标页面才会生效。总开关（「通用」页）关闭时不会读取本页设置，扩展在任何页面都不工作。"
+	},
+	"option_section_bwl_whitelist": {
+		"message": "白名单"
+	},
+	"option_section_bwl_blacklist": {
+		"message": "黑名单"
+	},
+	"option_section_bwl_order": {
+		"message": "生效顺序"
+	},
+	"option_section_bwl_match": {
+		"message": "匹配规则"
+	},
+	"option_section_bwl_timing": {
+		"message": "生效时机"
+	},
+	"option_bwl_isOpen_white": {
+		"message": "启用白名单"
+	},
+	"option_bwl_white_tooltip": {
+		"message": "开启后，只有命中下列规则的网址才会运行扩展。"
+	},
+	"option_bwl_isOpen_black": {
+		"message": "启用黑名单"
+	},
+	"option_bwl_black_tooltip": {
+		"message": "开启后，命中下列规则的网址会跳过扩展。"
+	},
+	"option_bwl_list_label": {
+		"message": "网址规则"
+	},
+	"option_bwl_list_empty": {
+		"message": "暂无规则，点击下方按钮添加。"
+	},
+	"option_bwl_list_add": {
+		"message": "添加一行"
+	},
+	"option_bwl_list_delete": {
+		"message": "删除此行"
+	},
+	"option_bwl_rule_placeholder": {
+		"message": "example.com"
+	},
+	"option_bwl_rule_empty": {
+		"message": "规则不能为空"
+	},
+	"option_bwl_rule_invalid_regex": {
+		"message": "正则表达式无效"
+	},
+	"option_bwl_order_1": {
+		"message": "白名单优先于黑名单：只要白名单处于开启状态，黑名单就完全不参与判断。"
+	},
+	"option_bwl_order_2": {
+		"message": "白名单开启：只有命中白名单的页面会运行，未命中的页面被整体跳过。"
+	},
+	"option_bwl_order_3": {
+		"message": "白名单关闭、黑名单开启：命中黑名单的页面被跳过，其余页面正常运行。"
+	},
+	"option_bwl_order_4": {
+		"message": "两个都关闭：不做任何限制，所有页面都会运行。"
+	},
+	"option_bwl_match_1": {
+		"message": "匹配对象是当前标签页的顶层网址，而不是 iframe 内部的地址；即使脚本运行在 iframe 中，使用的也是同一个顶层网址。"
+	},
+	"option_bwl_match_2": {
+		"message": "普通文本按「包含」匹配，可以是域名、路径或任意片段。"
+	},
+	"option_bwl_example_1": {
+		"message": "example.com"
+	},
+	"option_bwl_example_1_desc": {
+		"message": "命中所有包含该文本的网址，例如 https://example.com/login 或 https://api.example.com/。"
+	},
+	"option_bwl_match_3": {
+		"message": "用两个斜杠包裹的内容按正则表达式匹配。"
+	},
+	"option_bwl_example_2": {
+		"message": "/^https:\\/\\/example\\.com\\//"
+	},
+	"option_bwl_example_2_desc": {
+		"message": "只命中 https 且以 https://example.com/ 开头的网址。"
+	},
+	"option_bwl_match_4": {
+		"message": "列表中只要有一条规则命中就算命中，不区分具体是哪一条。"
+	},
+	"option_bwl_match_5": {
+		"message": "空白行会命中所有网址，因此不允许保存空白规则。"
+	},
+	"option_bwl_timing_1": {
+		"message": "判断在每个标签页的内容脚本启动时（document_end）读取一次配置，因此修改后必须刷新页面。"
+	},
+	"option_bwl_timing_2": {
+		"message": "总开关关闭时不会执行这段判断，扩展在任何页面都不会工作。"
+	}
+}
