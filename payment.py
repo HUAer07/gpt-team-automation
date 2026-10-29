@@ -116,7 +116,7 @@ class PaymentManager:
                             return { ok: false, error: "无法从当前会话获取 accessToken", country, currency };
                         }
 
-                        // 3. 组装标准 OpenAI Team Checkout 载荷 (兼容带优惠码与无优惠码)
+                        // 3. 组装标准 OpenAI Team Checkout 载荷 (固定 3 席位，兼容带优惠码与无优惠码)
                         const candidates = [];
                         if (promoCode) {
                             candidates.push({
@@ -124,7 +124,7 @@ class PaymentManager:
                                 team_plan_data: {
                                     workspace_name: workspaceName,
                                     price_interval: "month",
-                                    seat_quantity: 2
+                                    seat_quantity: 3
                                 },
                                 billing_details: { country, currency },
                                 cancel_url: `https://chatgpt.com/?promoCode=${encodeURIComponent(promoCode)}`,
@@ -137,7 +137,7 @@ class PaymentManager:
                                     team_plan_data: {
                                         workspace_name: workspaceName,
                                         price_interval: "month",
-                                        seat_quantity: 2
+                                        seat_quantity: 3
                                     },
                                     billing_details: { country: "US", currency: "USD" },
                                     cancel_url: `https://chatgpt.com/p/${encodeURIComponent(promoCode)}`,
@@ -151,7 +151,7 @@ class PaymentManager:
                             team_plan_data: {
                                 workspace_name: workspaceName,
                                 price_interval: "month",
-                                seat_quantity: 2
+                                seat_quantity: 3
                             },
                             billing_details: { country, currency },
                             cancel_url: "https://chatgpt.com/#pricing",
