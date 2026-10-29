@@ -280,6 +280,20 @@ class TeamClient:
         logger.error(f"转移所有权失败: HTTP {res.get('status')} {res.get('text')}")
         return False
 
+    async def remove_member(self, workspace_id: str, target_user_id: str) -> bool:
+        """由工作区主所有者 (Primary Owner 子号) 将指定成员 (母号) 踢出工作区"""
+        logger.info(f"[{self.session.email}] (作为工作区所有者) 正在将成员 {target_user_id} 移出工作区 {workspace_id}...")
+        res = await self._browser_fetch(
+            "DELETE",
+            f"/accounts/{workspace_id}/users/{target_user_id}",
+            workspace_id=workspace_id,
+        )
+        if res.get("ok"):
+            logger.info(f"成员 {target_user_id} 已成功被移出工作区")
+            return True
+        logger.error(f"移出成员失败: HTTP {res.get('status')} {res.get('text')}")
+        return False
+
     async def leave_workspace(self, workspace_id: str) -> bool:
         """母号脱离工作区"""
         logger.info(f"[{self.session.email}] 正在主动脱离工作区 {workspace_id}...")

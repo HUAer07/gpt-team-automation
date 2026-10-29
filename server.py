@@ -542,6 +542,7 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
     }
 
     child_session: Optional[AuthSession] = None
+    child_client: Optional[TeamClient] = None
     completed_batches = 0
 
     try:
@@ -551,6 +552,7 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
             current_start_step = start_from_step if batch_idx == 1 else 1
             state.start_step = current_start_step
             state.current_step = current_start_step
+            master_user_id: Optional[str] = None
 
             # 检查当前待分配子号
             active_children = settings.children if settings.children else ([settings.child] if settings.child.email else [])
@@ -587,7 +589,8 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                 "msg": f"[批次 {batch_idx}/{total_batches}] {state.step_message}" if total_batches > 1 else state.step_message
             })
 
-            # 1. 登录或直接复用母号常驻浏览器 (母号绝不关闭浏览器)
+            # 1. 登录母号常驻浏览器并深度核验会话有效性 (若过期或掉线自动重新登录)
+            emit_log("info", f"🔍 [母号在线核验] 正在检查母号 [{settings.master.email}] 会话健康度...")
             master_auth = Authenticator(settings.master, is_master=True)
             master_session = await master_auth.login(p)
             master_client = TeamClient(master_session)
@@ -692,14 +695,14 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                 emit_log("info", f">>> [步骤 3/5] 目标子号 [{primary_child.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
                 try:
                     c_auth = Authenticator(primary_child, is_master=False)
-                    c_session = await c_auth.login(p)
-                    c_client = TeamClient(c_session)
-                    accept_ok = await c_client.accept_pending_invites()
+                    child_session = await c_auth.login(p)
+                    child_client = TeamClient(child_session)
+                    accept_ok = await child_client.accept_pending_invites()
                     if accept_ok:
                         emit_log("success", f"目标子号 [{primary_child.email}] 成功确认接受入组！")
                     else:
                         emit_log("info", f"目标子号 [{primary_child.email}] 未检测到待确认邀请或已是成员")
-                    await c_session.close_if_child()
+                    # 保留 child_session，暂不关闭，供步骤 5 由子号踢出母号使用
                 except Exception as e_c:
                     emit_log("error", f"目标子号 [{primary_child.email}] 登录或入组异常: {e_c}")
                     emit_log("error", f"目标子号 [{primary_child.email}] 登录/入组失败，终止后续转让流程以防止工作区失控！(修正后可从步骤 3 继续)")
@@ -725,9 +728,14 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                 child_user_id = None
                 for m in members:
                     user_info = m.get("user", {})
-                    if (user_info.get("email") or "").strip().lower() == primary_child.email.strip().lower():
+                    e = (user_info.get("email") or "").strip().lower()
+                    if e == primary_child.email.strip().lower():
                         child_user_id = user_info.get("id")
-                        break
+                    elif e == settings.master.email.strip().lower():
+                        master_user_id = user_info.get("id")
+
+                if not master_user_id and master_session.user_id:
+                    master_user_id = master_session.user_id
 
                 if not child_user_id:
                     emit_log("error", f"未在工作区找到已入组的首选主子号 [{primary_child.email}]，可能子号未成功入组！(可返回步骤 3 重新入组)")
@@ -749,18 +757,53 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                 emit_log("info", f"⏩ [断点续跑] 跳过步骤 4 (转移所有权)，直接从步骤 {current_start_step} 继续...")
 
             # ---------------------------------------------------------
-            # 步骤 5: 母号退出与子号出队
+            # 步骤 5: 由已成为 Primary Owner 的子号将母号踢出工作区
             # ---------------------------------------------------------
             if current_start_step <= 5:
                 state.current_step = 5
-                state.step_message = "步骤 5: 母号安全脱离工作区"
+                state.step_message = f"步骤 5: 由子号 [{primary_child.email}] 将母号踢出工作区"
                 await broadcast_event("state_change", {"step": 5, "failed_step": state.failed_step, "status": "running", "msg": state.step_message})
-                emit_log("info", ">>> [步骤 5/5] 母号主动脱离工作区...")
+                emit_log("info", f">>> [步骤 5/5] 子号 [{primary_child.email}] (Primary Owner) 执行指令将母号 [{settings.master.email}] 移出工作区...")
                 
-                await master_client.leave_workspace(workspace_id)
-                emit_log("success", f"母号已安全脱离，工作区已完全交割，目标子号 [{primary_child.email}] 为唯一的主所有者 (Primary Owner)！")
+                # 确保子号客户端就绪
+                if not child_session or not child_client or (child_session.page and child_session.page.is_closed()):
+                    emit_log("info", f"唤起子号会话以发送移出成员指令...")
+                    c_auth = Authenticator(primary_child, is_master=False)
+                    child_session = await c_auth.login(p)
+                    child_client = TeamClient(child_session)
 
-                # 自动将该交付完成的子号从待处理队列移出并持久化到 .env
+                kick_ok = False
+                if master_user_id:
+                    kick_ok = await child_client.remove_member(workspace_id, master_user_id)
+
+                if not kick_ok:
+                    try:
+                        m_list = await child_client.get_workspace_users(workspace_id)
+                        for m in m_list:
+                            if (m.get("user", {}).get("email") or "").strip().lower() == settings.master.email.strip().lower():
+                                master_user_id = m.get("user", {}).get("id")
+                                break
+                        if master_user_id:
+                            kick_ok = await child_client.remove_member(workspace_id, master_user_id)
+                    except Exception:
+                        pass
+
+                if kick_ok:
+                    emit_log("success", f"子号 [{primary_child.email}] 已成功将母号移出工作区，子号为唯一的主所有者 (Primary Owner)！")
+                else:
+                    emit_log("warning", "子号移出母号请求未直接返回成功，尝试备用接口脱离...")
+                    try:
+                        await master_client.leave_workspace(workspace_id)
+                    except Exception:
+                        pass
+
+                # 安全关闭子号会话
+                if child_session:
+                    await child_session.close_if_child()
+                    child_session = None
+                    child_client = None
+
+                # 自动将交付完成的子号从待处理队列移出并持久化到 .env
                 consume_completed_child(primary_child.email)
                 await broadcast_event("config_updated", {
                     "children_raw": settings.children_raw,

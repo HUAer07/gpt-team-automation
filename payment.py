@@ -323,7 +323,25 @@ class PaymentManager:
                         )
                         return url
                     else:
-                        logger.warning(f"{promo_label} 提取返回告警: {result.get('error') if result else '无响应'}")
+                        err_str = str(result.get("error") if result else "无响应")
+                        logger.warning(f"{promo_label} 提取返回告警: {err_str}")
+                        if "invalidated oauth token" in err_str.lower():
+                            logger.warning("检测到母号 OAuth 会话在提链调用中失效，立即触发母号自动重新登录并恢复会话...")
+                            try:
+                                from auth import Authenticator, get_global_playwright
+                                p_temp = await get_global_playwright()
+                                m_auth = Authenticator(settings.master, is_master=True)
+                                new_sess = await m_auth.relogin_master(p_temp)
+                                if new_sess and new_sess.access_token:
+                                    self.session = new_sess
+                                    retry_res = await new_sess.page.evaluate(eval_js, eval_args)
+                                    if retry_res and retry_res.get("ok") and retry_res.get("url"):
+                                        url = retry_res["url"]
+                                        self.last_used_promo = current_promo if current_promo else None
+                                        logger.success(f"🎯 重登恢复后成功提取支付长链: {url}")
+                                        return url
+                            except Exception as re_err:
+                                logger.warning(f"母号自动重登提链异常: {re_err}")
                 except Exception as e:
                     logger.warning(f"母号浏览器内联 API 提取异常 ({promo_label}): {e}")
 

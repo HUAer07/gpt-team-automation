@@ -475,7 +475,60 @@ class Authenticator:
         """兼容旧调用的快捷入口"""
         return await self.handle_cloudflare(page, max_wait=max_wait)
 
-    async def login(self, p=None) -> AuthSession:
+    async def _check_page_session_health(self, page: Page) -> Dict[str, Any]:
+        """深度检查当前页面上的 OpenAI 会话健康度：
+        1. 页面是否呈现 'Your session has expired' / 'Please log in again' 模态框
+        2. /api/auth/session 是否存在且具有 accessToken
+        3. 向 /backend-api 发起轻量鉴权探测，确保 Token 未被标记为 invalidated oauth token
+        """
+        try:
+            res = await page.evaluate("""
+                async () => {
+                    const bodyText = document.body ? document.body.innerText : "";
+                    if (bodyText.includes("Your session has expired") || bodyText.includes("Please log in again")) {
+                        return { ok: false, reason: "session_expired_dialog" };
+                    }
+                    try {
+                        const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+                        if (!r.ok) return { ok: false, reason: `session_http_${r.status}` };
+                        const data = await r.json();
+                        if (!data || !data.accessToken) return { ok: false, reason: "no_access_token" };
+
+                        // 真实后端鉴权探测，避开发生在退出工作区后的 token 失效
+                        try {
+                            const probe = await fetch('/backend-api/accounts/check/v4-2023-04-27', {
+                                headers: { 'Authorization': `Bearer ${data.accessToken}` }
+                            });
+                            if (probe.status === 401) {
+                                return { ok: false, reason: "token_invalidated_401" };
+                            }
+                            const probeData = await probe.json().catch(() => ({}));
+                            const strData = JSON.stringify(probeData).toLowerCase();
+                            if (strData.includes("invalidated oauth token") || strData.includes("token_expired")) {
+                                return { ok: false, reason: "invalidated_oauth_token" };
+                            }
+                        } catch (probeErr) {}
+
+                        return { ok: true, data: data };
+                    } catch (e) {
+                        return { ok: false, reason: String(e) };
+                    }
+                }
+            """)
+            if isinstance(res, dict):
+                return res
+            return {"ok": False, "reason": "evaluate_failed"}
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+
+    async def relogin_master(self, p=None) -> AuthSession:
+        """强制对母号进行重新登录并更新会话缓存"""
+        email_key = self.account.email.strip().lower()
+        _MASTER_SESSIONS.pop(email_key, None)
+        _MASTER_DISK_CACHE.pop(email_key, None)
+        return await self.login(p=p, force_relogin=True)
+
+    async def login(self, p=None, force_relogin: bool = False) -> AuthSession:
         if not self.account.email or not self.account.password:
             raise ValueError("账号凭据缺失: 邮箱或密码为空，请先在控制台配置！")
 
@@ -484,10 +537,10 @@ class Authenticator:
 
         email_key = self.account.email.strip().lower()
 
-        # 1. 母号优先检查是否已在线：只要登录成功过一次，后续直接检测母号在不在，在就直接跳过登录！
-        if self.is_master:
+        # 1. 母号优先检查是否已在线且会话真实有效 (非强制重新登录模式下)
+        if self.is_master and not force_relogin:
             active_proxy_str, _ = self._get_target_proxy_str()
-            logger.info(f"🔍 [母号状态检查] 正在检查母号 [{self.account.email}] 是否已在线...")
+            logger.info(f"🔍 [母号状态核验] 正在检查母号 [{self.account.email}] 是否已在线且会话有效...")
             if email_key in _MASTER_SESSIONS and _MASTER_PROXIES.get(email_key) == active_proxy_str:
                 existing = _MASTER_SESSIONS[email_key]
                 if existing.context and existing.page and not existing.page.is_closed():
@@ -495,16 +548,10 @@ class Authenticator:
                         if "chatgpt.com" not in existing.page.url or "/auth" in existing.page.url:
                             await existing.page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
                             await asyncio.sleep(1.5)
-                        sess_data = await existing.page.evaluate("""
-                            async () => {
-                                try {
-                                    const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
-                                    if (!r.ok) return null;
-                                    return await r.json();
-                                } catch (e) { return null; }
-                            }
-                        """)
-                        if sess_data and sess_data.get("accessToken"):
+
+                        health = await self._check_page_session_health(existing.page)
+                        if health.get("ok"):
+                            sess_data = health.get("data", {})
                             set_active_browser_page(existing.page)
                             existing.access_token = sess_data.get("accessToken", "")
                             existing.user_id = sess_data.get("user", {}).get("id", existing.user_id)
@@ -516,12 +563,30 @@ class Authenticator:
                                 existing.user_id,
                                 existing.cookies,
                             )
-                            logger.success(f"✅ [母号在线] 检测到母号 [{self.account.email}] 处于已登录状态，直接复用现有会话（跳过登录）！")
+                            logger.success(f"✅ [母号在线] 检测到母号 [{self.account.email}] 处于有效登录状态，直接复用现有会话！")
                             return existing
+                        else:
+                            reason = health.get("reason", "unknown")
+                            logger.warning(f"⚠️ [母号会话失效] 检测到母号在线状态已失效 (原因: {reason})，清除旧会话并立即启动自动重新登录...")
+                            _MASTER_SESSIONS.pop(email_key, None)
+                            _MASTER_DISK_CACHE.pop(email_key, None)
+
+                            # 若页面停留在 "Your session has expired" 弹窗，自动点击其 Log in 按钮进入登录页
+                            expired_btn = existing.page.locator('button:has-text("Log in"), [role="dialog"] button:has-text("Log in")').first
+                            try:
+                                if await expired_btn.is_visible(timeout=1200):
+                                    logger.info("点击 'Your session has expired' 弹窗中的 [Log in] 按钮进入登录页...")
+                                    await expired_btn.click()
+                                    await asyncio.sleep(2)
+                            except Exception:
+                                pass
                     except Exception as e:
-                        logger.warning(f"[{self.account.email}] 常驻窗口会话检查异常，尝试通过持久化 Profile 恢复: {e}")
+                        logger.warning(f"[{self.account.email}] 常驻窗口会话检查异常，尝试重新认证: {e}")
         else:
-            logger.info(f"[{self.account.email}] (子号轮换) 启动独立浏览器准备登录...")
+            if not self.is_master:
+                logger.info(f"[{self.account.email}] (子号轮换) 启动独立浏览器准备登录...")
+            else:
+                logger.info(f"[{self.account.email}] 触发母号强制重新认证登录流程...")
 
         browser, context = await self.create_stealth_context(p)
         page: Page = context.pages[0] if context.pages else await context.new_page()
@@ -544,7 +609,7 @@ class Authenticator:
                 except Exception as e:
                     logger.warning(f"打开页面延迟较高: {e}")
 
-                # 动态等待：持续检测是否已存在有效登录态 (优先复用已记录的母号会话)，仅在确认未登录时才点击 Log in
+                # 动态等待：持续检测是否已存在有效登录态
                 start_load = time.time()
                 email_ready = False
                 logged_offline_notice = False
@@ -552,23 +617,22 @@ class Authenticator:
 
                 while time.time() - start_load < 120:
                     elapsed_load = time.time() - start_load
-                    # 0. 核心检测：每轮优先查询 /api/auth/session，只要已有 accessToken 说明母号/账号在线，立即跳过登录！
+                    # 0. 核心检测：每轮优先调用深度健康核验
                     try:
                         is_cf_now, _ = await self.is_in_cloudflare(page)
                         if not is_cf_now and "chatgpt.com" in page.url and "auth" not in page.url:
-                            cached_session = await page.evaluate("""
-                                async () => {
-                                    try {
-                                        const res = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
-                                        if (!res.ok) return null;
-                                        return await res.json();
-                                    } catch (e) { return null; }
-                                }
-                            """)
-                            if cached_session and cached_session.get("accessToken"):
-                                logger.success(f"✅ [{self.account.email}] 检测到账号已处于登录状态，直接复用已记录会话（无需重新登录）！")
+                            health = await self._check_page_session_health(page)
+                            if health.get("ok"):
+                                logger.success(f"✅ [{self.account.email}] 检测到账号已处于有效登录状态，直接复用会话！")
                                 already_logged_in = True
                                 break
+                            elif health.get("reason") == "session_expired_dialog":
+                                expired_btn = page.locator('button:has-text("Log in"), [role="dialog"] button:has-text("Log in")').first
+                                if await expired_btn.is_visible(timeout=800):
+                                    logger.info(f"[{self.account.email}] 页面弹出 'Your session has expired'，自动点击 [Log in] 进入登录...")
+                                    await expired_btn.click()
+                                    await asyncio.sleep(2)
+                                    continue
                     except Exception:
                         pass
 

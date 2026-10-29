@@ -135,14 +135,19 @@ async def run_pipeline(total_batches: int = 1):
         # 步骤 3: 登录目标子号并接受邀请
         # ---------------------------------------------------------
         logger.info(f"\n>>> [步骤 3/5] 启动目标子号 [{primary_child.email}] 自动登录与入组确认...")
+        child_session = None
+        child_client = None
+        master_user_id = None
         try:
             child_auth = Authenticator(primary_child, is_master=False)
             child_session = await child_auth.login(p)
             child_client = TeamClient(child_session)
             await child_client.accept_pending_invites()
-            await child_session.close_if_child()
+            # 保留会话给步骤 5 由子号踢出母号使用
         except Exception as e_c:
             logger.error(f"目标子号 [{primary_child.email}] 登录或入组异常: {e_c}")
+            if child_session:
+                await child_session.close_if_child()
             return
 
         await asyncio.sleep(settings.step_delay)
@@ -155,32 +160,69 @@ async def run_pipeline(total_batches: int = 1):
         child_user_id = None
         for m in members:
             user_info = m.get("user", {})
-            if (user_info.get("email") or "").strip().lower() == primary_child.email.strip().lower():
+            e = (user_info.get("email") or "").strip().lower()
+            if e == primary_child.email.strip().lower():
                 child_user_id = user_info.get("id")
-                break
+            elif e == settings.master.email.strip().lower():
+                master_user_id = user_info.get("id")
+
+        if not master_user_id and master_session.user_id:
+            master_user_id = master_session.user_id
 
         if not child_user_id:
             logger.error(f"在工作区中未找到已就绪的主子号成员 [{primary_child.email}]，可能子号尚未点击接受！")
+            if child_session:
+                await child_session.close_if_child()
             return
 
         logger.info(f"找到主子号工作区用户标识: {child_user_id}，开始转移 Primary Owner...")
         transfer_ok = await master_client.transfer_primary_ownership(workspace_id, child_user_id)
         if not transfer_ok:
             logger.error("转移所有权失败，请检查母号权限或是否有二次验证阻断")
+            if child_session:
+                await child_session.close_if_child()
             return
 
-        logger.info(f"主所有权转移成功！等待 {settings.step_delay} 秒后执行母号退出...")
+        logger.info(f"主所有权转移成功！等待 {settings.step_delay} 秒后由子号踢出母号...")
         await asyncio.sleep(settings.step_delay)
 
         # ---------------------------------------------------------
-        # 步骤 5: 母号脱离工作区，子号接管与出队
+        # 步骤 5: 由子号将母号移出工作区，子号接管与出队
         # ---------------------------------------------------------
-        logger.info("\n>>> [步骤 5/5] 母号主动脱离工作区...")
-        leave_ok = await master_client.leave_workspace(workspace_id)
-        if leave_ok:
-            logger.info(f"母号已成功退出工作区，目标子号 [{primary_child.email}] 接管成为唯一 Primary Owner")
+        logger.info(f"\n>>> [步骤 5/5] 子号 [{primary_child.email}] (Primary Owner) 执行指令将母号 [{settings.master.email}] 移出工作区...")
+        if not child_session or not child_client or (child_session.page and child_session.page.is_closed()):
+            child_auth = Authenticator(primary_child, is_master=False)
+            child_session = await child_auth.login(p)
+            child_client = TeamClient(child_session)
+
+        kick_ok = False
+        if master_user_id:
+            kick_ok = await child_client.remove_member(workspace_id, master_user_id)
+
+        if not kick_ok:
+            try:
+                m_list = await child_client.get_workspace_users(workspace_id)
+                for m in m_list:
+                    if (m.get("user", {}).get("email") or "").strip().lower() == settings.master.email.strip().lower():
+                        master_user_id = m.get("user", {}).get("id")
+                        break
+                if master_user_id:
+                    kick_ok = await child_client.remove_member(workspace_id, master_user_id)
+            except Exception:
+                pass
+
+        if kick_ok:
+            logger.success(f"子号 [{primary_child.email}] 已成功将母号移出工作区，子号为唯一的主所有者 (Primary Owner)！")
         else:
-            logger.warning("母号主动脱离未完成，请检查是否需由子号将其踢出")
+            logger.warning("子号移出母号请求未直接返回成功，尝试备用脱离接口...")
+            try:
+                await master_client.leave_workspace(workspace_id)
+            except Exception:
+                pass
+
+        if child_session:
+            await child_session.close_if_child()
+            child_session = None
 
         consume_completed_child(primary_child.email)
         completed_batches += 1
