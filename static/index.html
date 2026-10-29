@@ -393,6 +393,15 @@
           </div>
 
           <div class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <!-- 批量运行批次选择 -->
+            <div class="flex items-center space-x-1.5 bg-dark-950 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs text-slate-300">
+              <span class="text-slate-400 text-[11px] whitespace-nowrap flex items-center gap-1">
+                <i class="fa-solid fa-layer-group text-indigo-400"></i>批次:
+              </span>
+              <input id="batch_count_input" type="number" min="1" max="100" value="1" oninput="onBatchCountChange()" class="w-12 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-center text-xs text-indigo-300 font-bold focus:outline-none focus:border-indigo-500" title="连续循环执行的批次数，每批开通1个工作区并交付给1个子号" />
+              <button onclick="setAllBatches()" class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 font-medium transition" title="按当前剩余子号数量填满批次">全部</button>
+            </div>
+
             <!-- 起始步骤选择 (断点续跑支持) -->
             <div class="flex items-center space-x-1.5 bg-dark-950 border border-slate-700/80 rounded-xl px-2.5 py-2 text-xs text-slate-300">
               <span class="text-slate-400 text-[11px] whitespace-nowrap flex items-center gap-1">
@@ -1163,14 +1172,33 @@
       appendLog('info', `已手动设定任务执行起点为：【步骤 ${step}/5】`);
     }
 
-    function onStartStepChange() {
+    function onBatchCountChange() {
+      const count = parseInt(document.getElementById('batch_count_input')?.value) || 1;
       const step = parseInt(document.getElementById('start_step_select').value) || 1;
       const startBtnText = document.getElementById('btn-start-text');
-      if (step === 1) {
-        startBtnText.innerText = '启动全流程';
+      if (count > 1) {
+        startBtnText.innerText = `批量启动 (${count} 批)`;
       } else {
-        startBtnText.innerText = `从步骤 ${step} 启动`;
+        if (step === 1) {
+          startBtnText.innerText = '启动全流程';
+        } else {
+          startBtnText.innerText = `从步骤 ${step} 启动`;
+        }
       }
+    }
+
+    function setAllBatches() {
+      const max = currentChildren.length > 0 ? currentChildren.length : 1;
+      const input = document.getElementById('batch_count_input');
+      if (input) {
+        input.value = max;
+        onBatchCountChange();
+        appendLog('info', `已将连续运行批次自动设定为剩余子号总数: 【${max} 批】`);
+      }
+    }
+
+    function onStartStepChange() {
+      onBatchCountChange();
     }
 
     function resumePipeline() {
@@ -1197,16 +1225,17 @@
       await saveConfig(true); // 启动前自动同步表单配置到后端与环境
 
       const targetStep = explicitStep || parseInt(document.getElementById('start_step_select').value) || 1;
+      const batchCount = parseInt(document.getElementById('batch_count_input')?.value) || 1;
 
       try {
         const res = await fetch('/api/pipeline/start', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ start_step: targetStep })
+          body: JSON.stringify({ start_step: targetStep, batch_count: batchCount })
         });
         const ret = await res.json();
         if (res.ok) {
-          appendLog('info', `已成功下发任务执行指令 (起始步骤: ${targetStep}/5)...`);
+          appendLog('info', `已成功下发任务执行指令 (起始步骤: ${targetStep}/5, 批次数: ${batchCount})...`);
           const resumeBtn = document.getElementById('btn-resume');
           if (resumeBtn) resumeBtn.classList.add('hidden');
         } else {
@@ -1260,6 +1289,21 @@
           updateUIState(msg.data);
         } else if (msg.type === 'checkout_link') {
           showCheckoutLink(msg.data.url);
+        } else if (msg.type === 'config_updated') {
+          if (msg.data.children_raw !== undefined) {
+            const rawEl = document.getElementById('children_raw');
+            if (rawEl) {
+              rawEl.value = msg.data.children_raw;
+              onChildrenRawInput();
+            }
+          }
+          if (msg.data.promo_codes_raw !== undefined) {
+            const promoEl = document.getElementById('promo_codes_raw');
+            if (promoEl) {
+              promoEl.value = msg.data.promo_codes_raw;
+              onPromoCodesRawInput();
+            }
+          }
         }
       };
     }

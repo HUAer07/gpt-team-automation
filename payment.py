@@ -26,6 +26,7 @@ class PaymentManager:
     def __init__(self, master_session: AuthSession):
         self.session = master_session
         self.base_url = "https://chatgpt.com/backend-api"
+        self.last_used_promo: Optional[str] = None
 
     async def _detect_proxy_country(self, proxy_str: Optional[str]) -> Optional[str]:
         """通过指定代理请求 Cloudflare trace 识别代理出口国家代码 (如 CO / US / TR)"""
@@ -274,6 +275,7 @@ class PaymentManager:
                         result = await temp_page.evaluate(eval_js, eval_args)
                         if result and result.get("ok") and result.get("url"):
                             url = result["url"]
+                            self.last_used_promo = current_promo if current_promo else None
                             logger.success(
                                 f"🎯 成功通过【独立提链代理专用通道】提取支付长链 "
                                 f"(地区: {result.get('country')}/{result.get('currency')}, "
@@ -313,6 +315,7 @@ class PaymentManager:
 
                     if result and result.get("ok") and result.get("url"):
                         url = result["url"]
+                        self.last_used_promo = current_promo if current_promo else None
                         logger.success(
                             f"🎯 成功提取 3 席位支付长链 "
                             f"(地区: {result.get('country')}/{result.get('currency')}, "

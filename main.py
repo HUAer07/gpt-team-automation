@@ -1,19 +1,56 @@
 import asyncio
 import sys
+from pathlib import Path
+from dotenv import set_key
 from loguru import logger
 try:
     from patchright.async_api import async_playwright
 except ImportError:
     from playwright.async_api import async_playwright
 
-from config import settings
+from config import settings, AccountConfig
 from auth import Authenticator, AuthSession, get_global_playwright
 from team_client import TeamClient
 from payment import PaymentManager
 
-async def run_pipeline():
+ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+def consume_used_promo(promo_to_remove: str):
+    if not promo_to_remove or not settings.card.promo_codes:
+        return
+    clean_target = promo_to_remove.strip().upper()
+    current_promos = [p for p in settings.card.promo_codes]
+    if clean_target in current_promos:
+        current_promos.remove(clean_target)
+        settings.card.promo_codes = current_promos
+        settings.card.promo_codes_raw = "\n".join(current_promos)
+        settings.card.promo_code = current_promos[0] if current_promos else ""
+        if not ENV_FILE.exists():
+            ENV_FILE.touch()
+        set_key(str(ENV_FILE), "PROMO_CODES_RAW", settings.card.promo_codes_raw)
+        set_key(str(ENV_FILE), "PROMO_CODE", settings.card.promo_code)
+        logger.info(f"🎟️ 优惠码 [{clean_target}] 已自动核销并从队列中剔除，剩余优惠码: {len(current_promos)} 个")
+
+def consume_completed_child(child_email: str):
+    if not child_email or not settings.children:
+        return
+    clean_email = child_email.strip().lower()
+    remaining = [c for c in settings.children if c.email.strip().lower() != clean_email]
+    settings.children = remaining
+    raw_lines = [f"{c.email}----{c.password}----{c.totp_secret}" for c in remaining]
+    settings.children_raw = "\n".join(raw_lines)
+    settings.child = remaining[0] if remaining else AccountConfig(email="", password="", totp_secret="")
+    if not ENV_FILE.exists():
+        ENV_FILE.touch()
+    set_key(str(ENV_FILE), "CHILDREN_RAW", settings.children_raw)
+    set_key(str(ENV_FILE), "CHILD_EMAIL", settings.child.email)
+    set_key(str(ENV_FILE), "CHILD_PASSWORD", settings.child.password)
+    set_key(str(ENV_FILE), "CHILD_TOTP_SECRET", settings.child.totp_secret)
+    logger.success(f"🎯 子号 [{child_email}] 工作区已完全交付，已自动从待分配队列剔除，剩余待分配子号: {len(remaining)} 个")
+
+async def run_pipeline(total_batches: int = 1):
     logger.info("=" * 60)
-    logger.info("ChatGPT Team 自动化开通、入组与所有权移交系统启动")
+    logger.info(f"ChatGPT Team 自动化系统启动 (计划运行批次: {total_batches})")
     logger.info("=" * 60)
 
     # 1. 基础配置预检
@@ -21,15 +58,21 @@ async def run_pipeline():
         logger.error("请先在 .env 中配置母号邮箱与密码！")
         sys.exit(1)
     
-    active_children = settings.children if settings.children else ([settings.child] if settings.child.email else [])
-    if not active_children:
-        logger.error("请先在 .env 中配置子号邮箱与密码或 CHILDREN_RAW！")
-        sys.exit(1)
-    
-    primary_child = active_children[0]
-
     p = await get_global_playwright()
-    if True:
+    completed_batches = 0
+
+    for batch_idx in range(1, total_batches + 1):
+        active_children = settings.children if settings.children else ([settings.child] if settings.child.email else [])
+        if not active_children:
+            logger.warning(f"所有待分配子号均已交割完毕，批量任务提前结束（已完成 {completed_batches} 批）。")
+            break
+
+        primary_child = active_children[0]
+        if total_batches > 1:
+            logger.info("=" * 60)
+            logger.info(f"🚀 [批次 {batch_idx}/{total_batches} 启动] 目标子号: [{primary_child.email}] (单空间限拉 1 个子号)...")
+            logger.info("=" * 60)
+
         # ---------------------------------------------------------
         # 步骤 1: 登录母号并获取/开通工作区
         # ---------------------------------------------------------
@@ -72,6 +115,9 @@ async def run_pipeline():
                 logger.error("等待工作区激活超时，流程终止")
                 return
 
+            if pay_mgr.last_used_promo:
+                consume_used_promo(pay_mgr.last_used_promo)
+
         target_ws = workspaces[0]
         workspace_id = target_ws.get("id")
         workspace_name = target_ws.get("name", "Team")
@@ -98,6 +144,7 @@ async def run_pipeline():
         except Exception as e_c:
             logger.error(f"目标子号 [{primary_child.email}] 登录或入组异常: {e_c}")
             return
+
         await asyncio.sleep(settings.step_delay)
 
         # ---------------------------------------------------------
@@ -126,7 +173,7 @@ async def run_pipeline():
         await asyncio.sleep(settings.step_delay)
 
         # ---------------------------------------------------------
-        # 步骤 5: 母号脱离工作区，子号接管
+        # 步骤 5: 母号脱离工作区，子号接管与出队
         # ---------------------------------------------------------
         logger.info("\n>>> [步骤 5/5] 母号主动脱离工作区...")
         leave_ok = await master_client.leave_workspace(workspace_id)
@@ -135,19 +182,21 @@ async def run_pipeline():
         else:
             logger.warning("母号主动脱离未完成，请检查是否需由子号将其踢出")
 
-        # ---------------------------------------------------------
-        # 最终验证
-        # ---------------------------------------------------------
-        logger.info("\n" + "=" * 60)
-        logger.info("工作区最终状态核验:")
-        final_members = await child_client.get_workspace_users(workspace_id)
-        for m in final_members:
-            u = m.get("user", {})
-            r = m.get("role", "member")
-            logger.info(f"- 成员: {u.get('email')} | 角色: {r}")
-        await child_session.close_if_child()
-        logger.info("全流程执行完毕，目标子号已完整接管 Team 工作区！")
-        logger.info("=" * 60)
+        consume_completed_child(primary_child.email)
+        completed_batches += 1
+
+        if batch_idx < total_batches:
+            remaining_children = settings.children if settings.children else ([settings.child] if settings.child.email else [])
+            if not remaining_children:
+                logger.success(f"🎉 所有待分配子号均已交割完毕，批量任务提前圆满完成（已交付 {completed_batches} 批）！")
+                break
+            logger.info(f"⏳ [批次 {batch_idx}/{total_batches} 交付成功] 防风控休眠 {settings.step_delay} 秒后自动开启下一批次 (目标子号: [{remaining_children[0].email}])...")
+            await asyncio.sleep(settings.step_delay)
+
+    logger.info("\n" + "=" * 60)
+    logger.info(f"全流程执行完毕，已交付 {completed_batches} 个 Team 工作区！")
+    logger.info("=" * 60)
 
 if __name__ == "__main__":
-    asyncio.run(run_pipeline())
+    batches = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 1
+    asyncio.run(run_pipeline(total_batches=batches))
