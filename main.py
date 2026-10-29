@@ -28,8 +28,8 @@ async def run_pipeline():
         # ---------------------------------------------------------
         # 步骤 1: 登录母号并获取/开通工作区
         # ---------------------------------------------------------
-        logger.info("\n>>> [步骤 1/5] 启动母号自动登录与 TOTP 认证...")
-        master_auth = Authenticator(settings.master)
+        logger.info("\n>>> [步骤 1/5] 启动母号自动登录与 TOTP 认证 (常驻浏览器模式)...")
+        master_auth = Authenticator(settings.master, is_master=True)
         master_session = await master_auth.login(p)
         master_client = TeamClient(master_session)
         pay_mgr = PaymentManager(master_session)
@@ -38,7 +38,7 @@ async def run_pipeline():
         workspaces = await master_client.list_workspaces()
         if not workspaces:
             logger.warning("未检测到已就绪的 Team 工作区，开始提取 Stripe 支付长链...")
-            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name)
+            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
             if not checkout_url:
                 checkout_url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
 
@@ -87,7 +87,7 @@ async def run_pipeline():
         # 步骤 3: 登录子号并接受邀请
         # ---------------------------------------------------------
         logger.info(f"\n>>> [步骤 3/5] 启动子号 [{settings.child.email}] 自动登录与入组确认...")
-        child_auth = Authenticator(settings.child)
+        child_auth = Authenticator(settings.child, is_master=False)
         child_session = await child_auth.login(p)
         child_client = TeamClient(child_session)
 
@@ -142,6 +142,7 @@ async def run_pipeline():
             u = m.get("user", {})
             r = m.get("role", "member")
             logger.info(f"- 成员: {u.get('email')} | 角色: {r}")
+        await child_session.close_if_child()
         logger.info("全流程执行完毕，目标子号已完整接管 Team 工作区！")
         logger.info("=" * 60)
 

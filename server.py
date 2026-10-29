@@ -21,7 +21,7 @@ except ImportError:
     from playwright.async_api import async_playwright
 
 from config import settings, AccountConfig, CardConfig
-from auth import Authenticator, AuthSession
+from auth import Authenticator, AuthSession, get_global_playwright
 from team_client import TeamClient
 from payment import PaymentManager
 
@@ -255,31 +255,31 @@ async def get_status():
 
 @app.post("/api/payment/extract-link")
 async def manual_extract_link():
-    """独立触发提取长链端点"""
+    """独立触发提取长链端点 (复用母号常驻浏览器，不销毁/不切换母号窗口)"""
     if state.is_running:
         raise HTTPException(status_code=400, detail="后台有任务正在运行")
     if not settings.master.email or not settings.master.password:
         raise HTTPException(status_code=400, detail="母号邮箱和密码不能为空，请先在左侧输入！")
     
-    emit_log("info", ">>> 启动独立提取支付长链任务...")
+    emit_log("info", ">>> 启动独立提取支付长链任务 (母号常驻模式)...")
     try:
-        async with async_playwright() as p:
-            master_auth = Authenticator(settings.master)
-            master_session = await master_auth.login(p)
-            pay_mgr = PaymentManager(master_session)
+        p = await get_global_playwright()
+        master_auth = Authenticator(settings.master, is_master=True)
+        master_session = await master_auth.login(p)
+        pay_mgr = PaymentManager(master_session)
 
-            url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
-            if not url:
-                url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
+        url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
+        if not url:
+            url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
 
-            if url:
-                state.checkout_url = url
-                await broadcast_event("checkout_link", {"url": url})
-                emit_log("success", f"🎯 提取长链成功: {url}")
-                return {"status": "success", "url": url}
-            else:
-                emit_log("error", "未能提取到支付长链，请检查母号账号状态")
-                return {"status": "failed", "message": "未能提取到长链"}
+        if url:
+            state.checkout_url = url
+            await broadcast_event("checkout_link", {"url": url})
+            emit_log("success", f"🎯 提取长链成功: {url}")
+            return {"status": "success", "url": url}
+        else:
+            emit_log("error", "未能提取到支付长链，请检查优惠码或母号账号状态")
+            return {"status": "failed", "message": "未能提取到长链"}
     except Exception as e:
         emit_log("error", f"提取长链异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -288,136 +288,139 @@ async def run_pipeline_worker():
     state.is_running = True
     state.status = "running"
     state.current_step = 1
-    state.step_message = "步骤 1: 登录母号与准备 Team 工作区"
+    state.step_message = "步骤 1: 登录/复用母号常驻浏览器与准备 Team 工作区"
     await broadcast_event("state_change", {"step": 1, "status": "running", "msg": state.step_message})
     
-    emit_log("info", ">>> [步骤 1/5] 启动母号自动登录与 TOTP 认证...")
+    emit_log("info", ">>> [步骤 1/5] 启动母号常驻浏览器会话与工作区检测...")
 
+    child_session: Optional[AuthSession] = None
     try:
-        async with async_playwright() as p:
-            # 1. 登录母号
-            master_auth = Authenticator(settings.master)
-            master_session = await master_auth.login(p)
-            master_client = TeamClient(master_session)
-            pay_mgr = PaymentManager(master_session)
+        p = await get_global_playwright()
+        # 1. 登录或直接复用母号常驻浏览器 (母号绝不关闭浏览器)
+        master_auth = Authenticator(settings.master, is_master=True)
+        master_session = await master_auth.login(p)
+        master_client = TeamClient(master_session)
+        pay_mgr = PaymentManager(master_session)
 
-            workspaces = await master_client.list_workspaces()
+        workspaces = await master_client.list_workspaces()
+        
+        # 若未开通 Team，则执行长链提取与支付流程
+        if not workspaces:
+            emit_log("warning", "母号名下暂无可用的 Team 工作区，开始通过母号常驻浏览器提取 Stripe 支付长链...")
             
-            # 若未开通 Team，则执行长链提取与支付流程
-            if not workspaces:
-                emit_log("warning", "母号名下暂无可用的 Team 工作区，开始提取 Stripe 支付长链...")
-                
-                checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
-                if not checkout_url:
-                    checkout_url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
+            checkout_url = await pay_mgr.extract_checkout_url_via_api(settings.card.workspace_name, promo_code=settings.card.promo_code)
+            if not checkout_url:
+                checkout_url = await pay_mgr.extract_checkout_url_via_browser(p, settings.card.workspace_name)
 
-                if not checkout_url:
-                    emit_log("error", "未能提取到 Stripe 支付长链，流程终止")
-                    state.status = "error"
-                    return
-
-                state.checkout_url = checkout_url
-                await broadcast_event("checkout_link", {"url": checkout_url})
-                emit_log("success", f"🎯 支付长链提取成功！")
-                emit_log("info", f"长链地址: {checkout_url}")
-
-                # 检查是否开启自动代付
-                if settings.card.auto_pay and settings.card.card_number:
-                    emit_log("info", "检测到已开启【自动代付】，正在通过浏览器提交信用卡信息结算...")
-                    pay_ok = await pay_mgr.auto_pay_stripe(p, checkout_url, settings.card)
-                    if not pay_ok:
-                        emit_log("error", "自动代付未完成或遇到 3DS 验证，请点击界面长链手动完成")
-                else:
-                    emit_log("info", "请点击控制台界面上的长链完成支付（或复制后在外部支付），系统已启动状态轮询...")
-
-                # 轮询等待工作区开通生效 (最多轮询 5 分钟)
-                emit_log("info", "等待工作区激活中，持续监听状态...")
-                for attempt in range(60):
-                    await asyncio.sleep(5)
-                    workspaces = await master_client.list_workspaces()
-                    if workspaces:
-                        emit_log("success", f"恭喜！检测到 Team 工作区已激活 (耗时约 {attempt * 5} 秒)")
-                        break
-                
-                if not workspaces:
-                    emit_log("error", "工作区开通超时 (5分钟)，无法继续后续邀请步骤")
-                    state.status = "error"
-                    return
-
-            target_ws = workspaces[0]
-            workspace_id = target_ws.get("id")
-            workspace_name = target_ws.get("name", "Team")
-            emit_log("success", f"锁定已激活的 Team 工作区 [{workspace_name}] ID: {workspace_id}")
-
-            # 2. 邀请子号 (Owner 权限)
-            state.current_step = 2
-            state.step_message = f"步骤 2: 发送 Owner 级别邀请给 {settings.child.email}"
-            await broadcast_event("state_change", {"step": 2, "status": "running", "msg": state.step_message})
-            emit_log("info", f">>> [步骤 2/5] 母号向子号 [{settings.child.email}] 发起 Owner 权限邀请...")
-            
-            invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="owner")
-            if not invite_ok:
-                emit_log("error", "邀请发送失败，流程终止")
+            if not checkout_url:
+                emit_log("error", "未能提取到 Stripe 支付长链，流程终止")
                 state.status = "error"
                 return
-            
-            emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
-            await asyncio.sleep(settings.step_delay)
 
-            # 3. 子号登录与入组
-            state.current_step = 3
-            state.step_message = f"步骤 3: 子号自动登录并接受邀请"
-            await broadcast_event("state_change", {"step": 3, "status": "running", "msg": state.step_message})
-            emit_log("info", f">>> [步骤 3/5] 子号 [{settings.child.email}] 自动登录与入组确认...")
-            
-            child_auth = Authenticator(settings.child)
-            child_session = await child_auth.login(p)
-            child_client = TeamClient(child_session)
-            await child_client.accept_pending_invites()
-            
-            await asyncio.sleep(settings.step_delay)
+            state.checkout_url = checkout_url
+            await broadcast_event("checkout_link", {"url": checkout_url})
+            emit_log("success", "🎯 支付长链提取成功！")
+            emit_log("info", f"长链地址: {checkout_url}")
 
-            # 4. 移交所有权
-            state.current_step = 4
-            state.step_message = "步骤 4: 移交 Primary Owner 主所有权"
-            await broadcast_event("state_change", {"step": 4, "status": "running", "msg": state.step_message})
-            emit_log("info", ">>> [步骤 4/5] 检索工作区用户列表并由母号发起转移...")
-            
-            members = await master_client.get_workspace_users(workspace_id)
-            child_user_id = None
-            for m in members:
-                user_info = m.get("user", {})
-                if user_info.get("email") == settings.child.email:
-                    child_user_id = user_info.get("id")
+            # 检查是否开启自动代付
+            if settings.card.auto_pay and settings.card.card_number:
+                emit_log("info", "检测到已开启【自动代付】，正在通过母号浏览器新标签页提交信用卡结算...")
+                pay_ok = await pay_mgr.auto_pay_stripe(p, checkout_url, settings.card)
+                if not pay_ok:
+                    emit_log("error", "自动代付未完成或遇到 3DS 验证，请点击界面长链手动完成")
+            else:
+                emit_log("info", "请点击控制台界面上的长链完成支付（或复制后在外部支付），系统已启动状态轮询...")
+
+            # 轮询等待工作区开通生效 (最多轮询 5 分钟)
+            emit_log("info", "等待工作区激活中，持续监听状态...")
+            for attempt in range(60):
+                await asyncio.sleep(5)
+                workspaces = await master_client.list_workspaces()
+                if workspaces:
+                    emit_log("success", f"恭喜！检测到 Team 工作区已激活 (耗时约 {attempt * 5} 秒)")
                     break
-
-            if not child_user_id:
-                emit_log("error", f"未在工作区找到已入组的子号 [{settings.child.email}]")
-                state.status = "error"
-                return
-
-            emit_log("info", f"子号内部 ID: {child_user_id}，转让 Primary Owner...")
-            transfer_ok = await master_client.transfer_primary_ownership(workspace_id, child_user_id)
-            if not transfer_ok:
-                emit_log("error", "所有权转移失败！")
-                state.status = "error"
-                return
-
-            emit_log("success", "主所有权已成功转移至目标子号！")
-            await asyncio.sleep(settings.step_delay)
-
-            # 5. 母号退出
-            state.current_step = 5
-            state.step_message = "步骤 5: 母号安全脱离工作区"
-            await broadcast_event("state_change", {"step": 5, "status": "running", "msg": state.step_message})
-            emit_log("info", ">>> [步骤 5/5] 母号主动脱离工作区...")
             
-            await master_client.leave_workspace(workspace_id)
-            emit_log("success", "母号已安全脱离，目标子号成为唯一的主所有者 (Primary Owner)！")
+            if not workspaces:
+                emit_log("error", "工作区开通超时 (5分钟)，无法继续后续邀请步骤")
+                state.status = "error"
+                return
 
-            state.status = "completed"
-            state.step_message = "全流程已成功完成"
-            await broadcast_event("state_change", {"step": 5, "status": "completed", "msg": state.step_message})
+        target_ws = workspaces[0]
+        workspace_id = target_ws.get("id")
+        workspace_name = target_ws.get("name", "Team")
+        emit_log("success", f"锁定已激活的 Team 工作区 [{workspace_name}] ID: {workspace_id}")
+
+        # 2. 邀请子号 (Owner 权限)
+        state.current_step = 2
+        state.step_message = f"步骤 2: 发送 Owner 级别邀请给 {settings.child.email}"
+        await broadcast_event("state_change", {"step": 2, "status": "running", "msg": state.step_message})
+        emit_log("info", f">>> [步骤 2/5] 母号向子号 [{settings.child.email}] 发起 Owner 权限邀请...")
+        
+        invite_ok = await master_client.invite_member(workspace_id, settings.child.email, role="owner")
+        if not invite_ok:
+            emit_log("error", "邀请发送失败，流程终止")
+            state.status = "error"
+            return
+        
+        emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
+        await asyncio.sleep(settings.step_delay)
+
+        # 3. 子号独立临时浏览器登录与入组 (子号用完即关，不影响母号常驻浏览器)
+        state.current_step = 3
+        state.step_message = "步骤 3: 子号独立登录并接受邀请"
+        await broadcast_event("state_change", {"step": 3, "status": "running", "msg": state.step_message})
+        emit_log("info", f">>> [步骤 3/5] 子号 [{settings.child.email}] 独立登录与入组确认 (不影响母号常驻窗口)...")
+        
+        child_auth = Authenticator(settings.child, is_master=False)
+        child_session = await child_auth.login(p)
+        child_client = TeamClient(child_session)
+        await child_client.accept_pending_invites()
+        await child_session.close_if_child()
+        child_session = None
+        
+        await asyncio.sleep(settings.step_delay)
+
+        # 4. 移交所有权
+        state.current_step = 4
+        state.step_message = "步骤 4: 移交 Primary Owner 主所有权"
+        await broadcast_event("state_change", {"step": 4, "status": "running", "msg": state.step_message})
+        emit_log("info", ">>> [步骤 4/5] 检索工作区用户列表并由母号发起转移...")
+        
+        members = await master_client.get_workspace_users(workspace_id)
+        child_user_id = None
+        for m in members:
+            user_info = m.get("user", {})
+            if (user_info.get("email") or "").strip().lower() == settings.child.email.strip().lower():
+                child_user_id = user_info.get("id")
+                break
+
+        if not child_user_id:
+            emit_log("error", f"未在工作区找到已入组的子号 [{settings.child.email}]")
+            state.status = "error"
+            return
+
+        emit_log("info", f"子号内部 ID: {child_user_id}，转让 Primary Owner...")
+        transfer_ok = await master_client.transfer_primary_ownership(workspace_id, child_user_id)
+        if not transfer_ok:
+            emit_log("error", "所有权转移失败！")
+            state.status = "error"
+            return
+
+        emit_log("success", "主所有权已成功转移至目标子号！")
+        await asyncio.sleep(settings.step_delay)
+
+        # 5. 母号退出
+        state.current_step = 5
+        state.step_message = "步骤 5: 母号安全脱离工作区"
+        await broadcast_event("state_change", {"step": 5, "status": "running", "msg": state.step_message})
+        emit_log("info", ">>> [步骤 5/5] 母号主动脱离工作区...")
+        
+        await master_client.leave_workspace(workspace_id)
+        emit_log("success", "母号已安全脱离，目标子号成为唯一的主所有者 (Primary Owner)！")
+
+        state.status = "completed"
+        state.step_message = "全流程已成功完成"
+        await broadcast_event("state_change", {"step": 5, "status": "completed", "msg": state.step_message})
 
     except asyncio.CancelledError:
         emit_log("warning", "任务已被手动取消")
@@ -428,6 +431,8 @@ async def run_pipeline_worker():
         state.status = "error"
         state.step_message = f"异常中断: {str(e)}"
     finally:
+        if child_session:
+            await child_session.close_if_child()
         state.is_running = False
         await broadcast_event("state_change", {"step": state.current_step, "status": state.status, "msg": state.step_message})
 

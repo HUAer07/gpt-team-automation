@@ -1,12 +1,13 @@
 import os
 import sys
+import shutil
 import asyncio
 import time
 import hashlib
 import subprocess
 from pathlib import Path
 import pyotp
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 from loguru import logger
 try:
     from patchright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -16,18 +17,64 @@ except ImportError:
     USING_PATCHRIGHT = False
 from config import AccountConfig, settings, get_playwright_proxy
 
+# 全局常驻 Playwright 引擎与母号长连接会话池 (保证母号登录后绝不关闭/切换浏览器)
+_GLOBAL_PLAYWRIGHT: Any = None
+_MASTER_SESSIONS: Dict[str, "AuthSession"] = {}
+
+
+async def get_global_playwright():
+    """获取全局常驻 Playwright 实例，避免任务结束时自动销毁母号浏览器"""
+    global _GLOBAL_PLAYWRIGHT
+    if _GLOBAL_PLAYWRIGHT is None:
+        _GLOBAL_PLAYWRIGHT = await async_playwright().start()
+    return _GLOBAL_PLAYWRIGHT
+
+
 class AuthSession:
-    def __init__(self, email: str, session_token: str, access_token: str, user_id: str, cookies: list):
+    def __init__(
+        self,
+        email: str,
+        session_token: str,
+        access_token: str,
+        user_id: str,
+        cookies: list,
+        context: Optional[BrowserContext] = None,
+        page: Optional[Page] = None,
+        is_master: bool = True,
+        profile_dir: Optional[Path] = None,
+    ):
         self.email = email
         self.session_token = session_token
         self.access_token = access_token
         self.user_id = user_id
         self.cookies = cookies
+        self.context = context
+        self.page = page
+        self.is_master = is_master
+        self.profile_dir = profile_dir
+
+    async def close_if_child(self):
+        """仅关闭子号临时浏览器并清理子号临时目录；母号浏览器永久保持在线"""
+        if self.is_master:
+            return
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+        if self.profile_dir and self.profile_dir.exists() and "child_" in self.profile_dir.name:
+            try:
+                shutil.rmtree(self.profile_dir, ignore_errors=True)
+            except Exception:
+                pass
+
 
 class Authenticator:
-    def __init__(self, account: AccountConfig):
+    def __init__(self, account: AccountConfig, is_master: bool = True):
         self.account = account
+        self.is_master = is_master
         self.totp = pyotp.TOTP(account.totp_secret) if account.totp_secret else None
+        self._last_profile_dir: Optional[Path] = None
 
     def get_totp_code(self) -> str:
         if not self.totp:
@@ -43,10 +90,18 @@ class Authenticator:
         else:
             logger.warning("【注意】未检测到住宅代理！当前正在使用云服务器机房 IP 直连，极易触发 Cloudflare 永不放行的严格机房风控！强烈建议配置住宅代理！")
 
-        # 为每个账号创建独立的持久化浏览器 Profile 目录，持久保留 cf_clearance 与登录态
+        # 母号使用固定持久化目录长期驻留；子号每次轮换使用全新独立目录
         profile_hash = hashlib.md5(self.account.email.strip().lower().encode()).hexdigest()[:12]
-        user_data_dir = Path(__file__).parent / "browser_profiles" / f"profile_{profile_hash}"
-        user_data_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_master:
+            user_data_dir = Path(__file__).parent / "browser_profiles" / f"master_{profile_hash}"
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            user_data_dir = Path(__file__).parent / "browser_profiles" / f"child_{profile_hash}"
+            if user_data_dir.exists():
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+
+        self._last_profile_dir = user_data_dir
 
         # 清理容器重启或异常退出遗留的 Chrome 锁文件，防止 Profile in use 报错
         for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
@@ -280,13 +335,52 @@ class Authenticator:
         """兼容旧调用的快捷入口"""
         return await self.handle_cloudflare(page, max_wait=max_wait)
 
-    async def login(self, p) -> AuthSession:
+    async def login(self, p=None) -> AuthSession:
         if not self.account.email or not self.account.password:
-            raise ValueError(f"账号凭据缺失: 邮箱或密码为空，请先在控制台配置！")
+            raise ValueError("账号凭据缺失: 邮箱或密码为空，请先在控制台配置！")
 
-        logger.info(f"[{self.account.email}] 开始自动化登录流程...")
+        if p is None:
+            p = await get_global_playwright()
+
+        email_key = self.account.email.strip().lower()
+
+        # 母号长连接复用：如果母号浏览器已经打开且页面存活，直接复用同一个浏览器窗口，绝不换浏览器！
+        if self.is_master and email_key in _MASTER_SESSIONS:
+            existing = _MASTER_SESSIONS[email_key]
+            if existing.context and existing.page and not existing.page.is_closed():
+                try:
+                    logger.info(f"[{self.account.email}] 检测到母号常驻浏览器在线，正在校验会话状态 (不切换浏览器)...")
+                    if "chatgpt.com" not in existing.page.url:
+                        await existing.page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(1.5)
+                    sess_data = await existing.page.evaluate("""
+                        async () => {
+                            try {
+                                const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+                                if (!r.ok) return null;
+                                return await r.json();
+                            } catch (e) { return null; }
+                        }
+                    """)
+                    if sess_data and sess_data.get("accessToken"):
+                        existing.access_token = sess_data.get("accessToken", "")
+                        existing.user_id = sess_data.get("user", {}).get("id", existing.user_id)
+                        existing.cookies = await existing.context.cookies()
+                        logger.success(f"♻️ [{self.account.email}] 母号常驻浏览器会话有效，直接原地复用！")
+                        return existing
+                except Exception as e:
+                    logger.warning(f"[{self.account.email}] 常驻浏览器会话刷新异常，准备重新恢复: {e}")
+                    try:
+                        await existing.context.close()
+                    except Exception:
+                        pass
+                    _MASTER_SESSIONS.pop(email_key, None)
+
+        role_tag = "母号(常驻)" if self.is_master else "子号(临时轮换)"
+        logger.info(f"[{self.account.email}] ({role_tag}) 开始自动化登录流程...")
         browser, context = await self.create_stealth_context(p)
         page: Page = context.pages[0] if context.pages else await context.new_page()
+        login_completed = False
 
         try:
             # 允许最多 2 次全流程重试以应对偶发代理网络超时
@@ -579,13 +673,27 @@ class Authenticator:
             user_id = session_resp.get("user", {}).get("id", "")
             
             logger.info(f"[{self.account.email}] 凭据解析成功 (UserID: {user_id[:8]}***)")
-            return AuthSession(
+            session_obj = AuthSession(
                 email=self.account.email,
                 session_token=session_token,
                 access_token=access_token,
                 user_id=user_id,
-                cookies=cookies
+                cookies=cookies,
+                context=context,
+                page=page,
+                is_master=self.is_master,
+                profile_dir=self._last_profile_dir,
             )
+            login_completed = True
+            if self.is_master:
+                _MASTER_SESSIONS[email_key] = session_obj
+                logger.info(f"📌 [{self.account.email}] 母号浏览器已锁定为长期常驻模式 (后续步骤及下次运行直接复用该浏览器)")
+            return session_obj
 
         finally:
-            await context.close()
+            # 若登录中途抛出异常且非母号常驻成功状态，则清理失败的上下文
+            if not login_completed and not self.is_master:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
