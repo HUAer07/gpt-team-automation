@@ -251,6 +251,7 @@ class Settings(BaseModel):
     children: List[AccountConfig] = Field(default_factory=list)
     card: CardConfig = Field(default_factory=CardConfig)
     yescaptcha_key: str = Field(default_factory=lambda: os.getenv("YESCAPTCHA_KEY", "7ec6a48c8cfe76f4f1b52c0b569cc078b43f1a0d136129"))
+    capsolver_key: str = Field(default_factory=lambda: os.getenv("CAPSOLVER_KEY", ""))
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)

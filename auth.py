@@ -8,6 +8,9 @@ import hashlib
 import subprocess
 from pathlib import Path
 import pyotp
+import re
+import random
+import httpx
 from typing import Dict, Optional, Tuple, Any
 from loguru import logger
 try:
@@ -16,7 +19,7 @@ try:
 except ImportError:
     from playwright.async_api import async_playwright, Browser, BrowserContext, Page
     USING_PATCHRIGHT = False
-from config import AccountConfig, settings, get_playwright_proxy, clean_totp_secret
+from config import AccountConfig, settings, get_playwright_proxy, get_httpx_proxy, clean_totp_secret
 
 # 全局常驻 Playwright 引擎、母号常驻浏览器实例池与磁盘会话记录文件
 _GLOBAL_PLAYWRIGHT: Any = None
@@ -142,6 +145,121 @@ class AuthSession:
                 shutil.rmtree(self.profile_dir, ignore_errors=True)
             except Exception:
                 pass
+
+
+# 常见国家代码 -> 标准时区与语言映射表
+GEO_TIMEZONE_MAP = {
+    "US": ("America/New_York", "en-US"),
+    "GB": ("Europe/London", "en-GB"),
+    "JP": ("Asia/Tokyo", "ja-JP"),
+    "SG": ("Asia/Singapore", "en-SG"),
+    "DE": ("Europe/Berlin", "de-DE"),
+    "FR": ("Europe/Paris", "fr-FR"),
+    "CA": ("America/Toronto", "en-CA"),
+    "AU": ("Australia/Sydney", "en-AU"),
+    "CO": ("America/Bogota", "es-CO"),
+    "TR": ("Europe/Istanbul", "tr-TR"),
+    "HK": ("Asia/Hong_Kong", "zh-HK"),
+    "TW": ("Asia/Taipei", "zh-TW"),
+    "KR": ("Asia/Seoul", "ko-KR"),
+    "NL": ("Europe/Amsterdam", "nl-NL"),
+}
+
+async def resolve_proxy_geo(proxy_str: Optional[str]) -> Dict[str, str]:
+    """通过代理探测真实出口的国家与时区，保证浏览器时区/语言与代理出口物理位置 100% 吻合"""
+    default_geo = {"timezone": "America/New_York", "locale": "en-US"}
+    if not proxy_str or not proxy_str.strip():
+        return default_geo
+
+    httpx_proxy = get_httpx_proxy(proxy_str)
+    if not httpx_proxy:
+        return default_geo
+
+    try:
+        async with httpx.AsyncClient(proxy=httpx_proxy, timeout=6.0, trust_env=False) as client:
+            resp = await client.get("https://www.cloudflare.com/cdn-cgi/trace")
+            if resp.status_code == 200:
+                m = re.search(r"^loc=([A-Z]{2})$", resp.text, re.MULTILINE)
+                if m:
+                    country = m.group(1).upper()
+                    if country in GEO_TIMEZONE_MAP:
+                        tz, loc = GEO_TIMEZONE_MAP[country]
+                        logger.info(f"🌐 探测到代理出口: [{country}]，自适应动态校准时区 -> {tz}，语言 -> {loc}")
+                        return {"timezone": tz, "locale": loc}
+    except Exception as e:
+        logger.debug(f"探测代理时区异常，使用安全默认值: {e}")
+
+    return default_geo
+
+STEALTH_EVASION_SCRIPT = """
+(() => {
+    // 1. 保护 toString，防止风控脚本检测到函数被 Hook
+    const nativeToString = Function.prototype.toString;
+    const hookedFns = new Set();
+    function protect(fn) {
+        hookedFns.add(fn);
+        return fn;
+    }
+    Function.prototype.toString = function() {
+        if (hookedFns.has(this)) {
+            return `function getParameter() { [native code] }`;
+        }
+        return nativeToString.apply(this, arguments);
+    };
+
+    // 2. 伪装硬件资源：消除云主机常见 1 核 / 1GB 内存的低配虚拟化特征
+    try {
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+    } catch (e) {}
+
+    // 3. 深度伪装 WebGL 渲染管线 (覆盖 Xvfb 的 llvmpipe / Mesa)
+    const spoofWebGL = (proto) => {
+        if (!proto) return;
+        const originalGetParam = proto.getParameter;
+        const newGetParam = function(parameter) {
+            // UNMASKED_VENDOR_WEBGL (0x9245 / 37445)
+            if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+            // UNMASKED_RENDERER_WEBGL (0x9246 / 37446)
+            if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            // VENDOR (0x1F00 / 7936)
+            if (parameter === 7936) return 'WebKit';
+            // RENDERER (0x1F01 / 7937)
+            if (parameter === 7937) return 'WebKit WebGL';
+            return originalGetParam.apply(this, arguments);
+        };
+        protect(newGetParam);
+        proto.getParameter = newGetParam;
+    };
+
+    if (window.WebGLRenderingContext) spoofWebGL(WebGLRenderingContext.prototype);
+    if (window.WebGL2RenderingContext) spoofWebGL(WebGL2RenderingContext.prototype);
+})();
+"""
+
+async def human_delay(base_seconds: float = 15.0, jitter: float = 0.35):
+    """
+    带高斯分布的时间抖动器，避免机械化的固定频率请求
+    例如 base=15.0, jitter=0.35 时，休眠时间将在 10.0 ~ 20.0 秒之间随机平滑波动
+    """
+    min_s = max(2.0, base_seconds * (1.0 - jitter))
+    max_s = base_seconds * (1.0 + jitter)
+    sleep_time = random.uniform(min_s, max_s)
+    logger.debug(f"⏳ 拟人化随机等待: {sleep_time:.2f}s (基准: {base_seconds}s)")
+    await asyncio.sleep(sleep_time)
+
+async def human_mouse_jitter(page: Page):
+    """在页面加载或操作间隙，模拟真实人类的无意识微量鼠标微晃与滚动"""
+    try:
+        vw = page.viewport_size or {"width": 1280, "height": 800}
+        target_x = random.randint(100, vw["width"] - 100)
+        target_y = random.randint(100, vw["height"] - 100)
+        await page.mouse.move(target_x, target_y, steps=random.randint(4, 10))
+        if random.random() < 0.35:
+            await page.mouse.wheel(0, random.choice([80, 120, -50]))
+    except Exception:
+        pass
 
 
 class Authenticator:
@@ -283,6 +401,9 @@ class Authenticator:
             args.append(f"--load-extension={ext_dir}")
             logger.info("🛡️ 已自动挂载 YesCaptcha 自动打码插件 (支持 Arkose 拼图 / Turnstile / hCaptcha 全自动过盾)")
 
+        # 动态自适应探测代理出口地理位置与对应时区
+        geo_info = await resolve_proxy_geo(active_proxy_str)
+
         launch_kwargs = {
             "user_data_dir": str(user_data_dir),
             "headless": is_headless,
@@ -290,8 +411,8 @@ class Authenticator:
             "ignore_default_args": ["--enable-automation", "--disable-extensions"],
             "proxy": proxy_dict,
             "viewport": {"width": win_w, "height": win_h},
-            "locale": "en-US",
-            "timezone_id": "America/New_York",
+            "locale": geo_info.get("locale", "en-US"),
+            "timezone_id": geo_info.get("timezone", "America/New_York"),
         }
 
         # 优先使用官方 Google Chrome (兼容 Linux 与 macOS)，消除开源 Chromium 指纹特征
@@ -301,6 +422,12 @@ class Authenticator:
             logger.info(f"已启用官方 Google Chrome 正版内核 ({engine_tag}) 与持久化 Profile ({user_data_dir.name})")
 
         context = await p.chromium.launch_persistent_context(**launch_kwargs)
+
+        # 注入全局 Stealth 防检测、显卡伪装 (规避 Xvfb llvmpipe) 与防篡改保护脚本
+        try:
+            await context.add_init_script(STEALTH_EVASION_SCRIPT)
+        except Exception as e:
+            logger.debug(f"注入 Stealth 防检测脚本异常: {e}")
 
         if self.is_master:
             _MASTER_CONTEXTS[email_key] = context
@@ -501,7 +628,7 @@ class Authenticator:
                     try {
                         const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
                         if (!r.ok) return { ok: false, reason: `session_http_${r.status}` };
-                        const data = await r.json();
+                        const data = await r.json().catch(() => null);
                         if (!data || !data.accessToken) return { ok: false, reason: "no_access_token" };
 
                         // 真实后端鉴权探测，避开发生在退出工作区后的 token 失效
@@ -603,6 +730,7 @@ class Authenticator:
         set_active_browser_page(page)
         login_completed = False
         already_logged_in = False
+        check_sess = None
 
         try:
             # 允许最多 2 次全流程重试以应对偶发代理网络超时
@@ -634,6 +762,7 @@ class Authenticator:
                             health = await self._check_page_session_health(page)
                             if health.get("ok"):
                                 logger.success(f"✅ [{self.account.email}] 检测到账号已处于有效登录状态，直接复用会话！")
+                                check_sess = health.get("data")
                                 already_logged_in = True
                                 break
                             elif health.get("reason") == "session_expired_dialog":
@@ -793,6 +922,7 @@ class Authenticator:
                 start_poll = time.time()
                 mfa_submitted = False
                 login_success = False
+                check_sess = None
 
                 while time.time() - start_poll < 120:
                     cur_url = page.url
@@ -904,13 +1034,13 @@ class Authenticator:
                             check_sess = await page.evaluate("""
                                 async () => {
                                     try {
-                                        const r = await fetch('/api/auth/session');
+                                        const r = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
                                         if (!r.ok) return null;
-                                        return await r.json();
+                                        return await r.json().catch(() => null);
                                     } catch (e) { return null; }
                                 }
                             """)
-                            if check_sess and check_sess.get("accessToken"):
+                            if check_sess and isinstance(check_sess, dict) and check_sess.get("accessToken"):
                                 logger.info(f"[{self.account.email}] 账号已成功进入 ChatGPT 主界面并拿到有效会话")
                                 login_success = True
                                 break
@@ -939,15 +1069,51 @@ class Authenticator:
                     session_token = c["value"]
                     break
 
-            session_resp = await page.evaluate("""
-                async () => {
-                    const res = await fetch('/api/auth/session');
-                    return await res.json();
-                }
-            """)
-            
+            session_resp = check_sess if (isinstance(check_sess, dict) and check_sess.get("accessToken")) else None
+            if not session_resp:
+                for retry_idx in range(6):
+                    try:
+                        session_resp = await page.evaluate("""
+                            async () => {
+                                try {
+                                    const res = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+                                    if (!res.ok) return null;
+                                    return await res.json().catch(() => null);
+                                } catch (e) {
+                                    return null;
+                                }
+                            }
+                        """)
+                        if session_resp and isinstance(session_resp, dict) and session_resp.get("accessToken"):
+                            break
+                    except Exception as e:
+                        logger.warning(f"[{self.account.email}] 提取 session 异常重试 ({retry_idx+1}/6): {e}")
+                    await asyncio.sleep(1.5)
+
+            session_resp = session_resp or {}
             access_token = session_resp.get("accessToken", "")
             user_id = session_resp.get("user", {}).get("id", "")
+            
+            if not access_token:
+                logger.warning(f"[{self.account.email}] 未能直接解析到 accessToken，尝试重新导航至 ChatGPT 主页...")
+                try:
+                    await page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=20000)
+                    await asyncio.sleep(2.5)
+                    session_resp = await page.evaluate("""
+                        async () => {
+                            try {
+                                const res = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+                                return await res.json().catch(() => null);
+                            } catch (e) { return null; }
+                        }
+                    """) or {}
+                    access_token = session_resp.get("accessToken", "")
+                    user_id = session_resp.get("user", {}).get("id", "")
+                except Exception as e:
+                    logger.warning(f"[{self.account.email}] 导航重试 session 失败: {e}")
+
+            if not access_token:
+                raise RuntimeError(f"[{self.account.email}] 登录完成但未能获取到有效 accessToken，当前 URL: {page.url}")
             
             logger.info(f"[{self.account.email}] 凭据解析成功 (UserID: {user_id[:8]}***)")
             session_obj = AuthSession(

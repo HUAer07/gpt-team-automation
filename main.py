@@ -9,7 +9,7 @@ except ImportError:
     from playwright.async_api import async_playwright
 
 from config import settings, AccountConfig
-from auth import Authenticator, AuthSession, get_global_playwright
+from auth import Authenticator, AuthSession, get_global_playwright, human_delay
 from team_client import TeamClient
 from payment import PaymentManager
 
@@ -128,8 +128,8 @@ async def run_pipeline(total_batches: int = 1):
         # ---------------------------------------------------------
         logger.info(f"\n>>> [步骤 2/5] 母号向目标子号 [{primary_child.email}] 发起 Owner (account-owner) 权限邀请 (单空间单子号模式)...")
         await master_client.invite_member(workspace_id, primary_child.email, role="account-owner")
-        logger.info(f"等待 {settings.step_delay} 秒以避免风控高频拦截...")
-        await asyncio.sleep(settings.step_delay)
+        logger.info(f"拟人化随机等待 (基准: {settings.step_delay} 秒) 以避免风控高频拦截...")
+        await human_delay(settings.step_delay)
 
         # ---------------------------------------------------------
         # 步骤 3: 登录目标子号并接受邀请
@@ -150,7 +150,7 @@ async def run_pipeline(total_batches: int = 1):
                 await child_session.close_if_child()
             return
 
-        await asyncio.sleep(settings.step_delay)
+        await human_delay(settings.step_delay)
 
         # ---------------------------------------------------------
         # 步骤 4: 检索主子号成员 ID 并移交主所有权
@@ -184,7 +184,7 @@ async def run_pipeline(total_batches: int = 1):
             return
 
         logger.info(f"主所有权转移成功！等待 {settings.step_delay} 秒后由子号踢出母号...")
-        await asyncio.sleep(settings.step_delay)
+        await human_delay(settings.step_delay)
 
         # ---------------------------------------------------------
         # 步骤 5: 由子号将母号移出工作区，子号接管与出队
@@ -233,7 +233,7 @@ async def run_pipeline(total_batches: int = 1):
                 logger.success(f"🎉 所有待分配子号均已交割完毕，批量任务提前圆满完成（已交付 {completed_batches} 批）！")
                 break
             logger.info(f"⏳ [批次 {batch_idx}/{total_batches} 交付成功] 防风控休眠 {settings.step_delay} 秒后自动开启下一批次 (目标子号: [{remaining_children[0].email}])...")
-            await asyncio.sleep(settings.step_delay)
+            await human_delay(settings.step_delay)
 
     logger.info("\n" + "=" * 60)
     logger.info(f"全流程执行完毕，已交付 {completed_batches} 个 Team 工作区！")

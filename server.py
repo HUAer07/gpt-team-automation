@@ -5,6 +5,10 @@ import time
 import shutil
 import asyncio
 import subprocess
+import base64
+import secrets
+import hmac
+import hashlib
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from dotenv import set_key, dotenv_values
@@ -13,6 +17,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HT
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 from pydantic import BaseModel
 import pyotp
 from loguru import logger
@@ -22,26 +28,82 @@ except ImportError:
     from playwright.async_api import async_playwright
 
 from config import settings, AccountConfig, CardConfig, parse_accounts_text, parse_account_line, parse_promo_codes, clean_totp_secret
-from auth import Authenticator, AuthSession, get_global_playwright, get_active_browser_page
+from auth import Authenticator, AuthSession, get_global_playwright, get_active_browser_page, human_delay, human_mouse_jitter
 from team_client import TeamClient
 from payment import PaymentManager
-
-app = FastAPI(title="ChatGPT Team Automation Dashboard")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 ENV_FILE = PROJECT_DIR / ".env"
 STATIC_DIR = PROJECT_DIR / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 
+def get_auth_credentials() -> tuple[str, str]:
+    env_vals = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
+    u = env_vals.get("WEB_USERNAME") or os.environ.get("WEB_USERNAME", "admin")
+    p = env_vals.get("WEB_PASSWORD") or os.environ.get("WEB_PASSWORD", "")
+    return u.strip(), p.strip()
+
+def get_session_token(password: str) -> str:
+    return hmac.new(password.encode("utf-8"), b"gpt-dashboard-auth", hashlib.sha256).hexdigest()
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        u_expected, p_expected = get_auth_credentials()
+        # 若未配置密码则跳过鉴权 (允许未设置密码时开发调试模式直接访问)
+        if not p_expected:
+            return await call_next(request)
+
+        # 检查 Authorization Header (HTTP Basic Auth)
+        auth_header = request.headers.get("Authorization")
+        authenticated = False
+        if auth_header and auth_header.startswith("Basic "):
+            try:
+                encoded = auth_header.split(" ", 1)[1]
+                decoded = base64.b64decode(encoded).decode("utf-8")
+                u, p = decoded.split(":", 1)
+                if secrets.compare_digest(u, u_expected) and secrets.compare_digest(p, p_expected):
+                    authenticated = True
+            except Exception:
+                pass
+
+        # 检查已登录 Session Cookie (避免浏览器每个子请求重复弹窗)
+        if not authenticated:
+            cookie_token = request.cookies.get("auth_session")
+            if cookie_token and secrets.compare_digest(cookie_token, get_session_token(p_expected)):
+                authenticated = True
+
+        if authenticated:
+            response = await call_next(request)
+            # 自动注入持久会话 Cookie，保证 WebSocket 与后续资源顺利连通
+            response.set_cookie(
+                key="auth_session",
+                value=get_session_token(p_expected),
+                max_age=86400 * 7,
+                httponly=True,
+                samesite="lax",
+            )
+            return response
+
+        return Response(
+            status_code=401,
+            content="401 Unauthorized - Access Restricted to ChatGPT Team Automation Dashboard",
+            headers={"WWW-Authenticate": 'Basic realm="ChatGPT Team Automation Dashboard"'},
+        )
+
+app = FastAPI(title="ChatGPT Team Automation Dashboard")
+
+app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+if (STATIC_DIR / "webfonts").exists():
+    app.mount("/webfonts", StaticFiles(directory=str(STATIC_DIR / "webfonts")), name="webfonts")
 
 @app.get("/api/screenshot")
 async def get_live_screenshot():
@@ -227,7 +289,9 @@ class ConfigPayload(BaseModel):
     billing_city: Optional[str] = "Wilmington"
     billing_state: Optional[str] = "DE"
     billing_zip: Optional[str] = "19801"
-    yescaptcha_key: Optional[str] = "7ec6a48c8cfe76f4f1b52c0b569cc078b43f1a0d136129"
+    yescaptcha_key: Optional[str] = ""
+    web_username: Optional[str] = "admin"
+    web_password: Optional[str] = ""
 
 class TotpVerifyPayload(BaseModel):
     secret: str
@@ -308,7 +372,9 @@ async def get_config():
         "billing_city": env_vals.get("BILLING_CITY", settings.card.billing_city),
         "billing_state": env_vals.get("BILLING_STATE", settings.card.billing_state),
         "billing_zip": env_vals.get("BILLING_ZIP", settings.card.billing_zip),
-        "yescaptcha_key": env_vals.get("YESCAPTCHA_KEY", getattr(settings, "yescaptcha_key", "7ec6a48c8cfe76f4f1b52c0b569cc078b43f1a0d136129")),
+        "yescaptcha_key": env_vals.get("YESCAPTCHA_KEY", getattr(settings, "yescaptcha_key", "")),
+        "web_username": env_vals.get("WEB_USERNAME", "admin"),
+        "web_password": env_vals.get("WEB_PASSWORD", ""),
     }
 
 @app.post("/api/config")
@@ -378,6 +444,10 @@ async def update_config(payload: ConfigPayload):
     set_key(str(ENV_FILE), "BILLING_CITY", payload.billing_city or "Wilmington")
     set_key(str(ENV_FILE), "BILLING_STATE", payload.billing_state or "DE")
     set_key(str(ENV_FILE), "BILLING_ZIP", payload.billing_zip or "19801")
+    if payload.web_username:
+        set_key(str(ENV_FILE), "WEB_USERNAME", payload.web_username.strip())
+    if payload.web_password is not None:
+        set_key(str(ENV_FILE), "WEB_PASSWORD", payload.web_password.strip())
     if payload.yescaptcha_key is not None:
         clean_yk = payload.yescaptcha_key.strip()
         set_key(str(ENV_FILE), "YESCAPTCHA_KEY", clean_yk)
@@ -783,8 +853,8 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                 else:
                     emit_log("warning", f"目标子号 [{primary_child.email}] 邀请未直接成功 (可能已在组内或需稍后核验)")
                 
-                emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
-                await asyncio.sleep(settings.step_delay)
+                emit_log("info", f"防风控拟人化随机冷却中 (基准: {settings.step_delay} 秒)...")
+                await human_delay(settings.step_delay)
             else:
                 emit_log("info", f"⏩ [断点续跑] 跳过步骤 2 (邀请阶段)，直接从步骤 {current_start_step} 继续...")
 
@@ -814,8 +884,8 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                     state.failed_step = 3
                     return
 
-                emit_log("info", f"防风控冷却中，等待 {settings.step_delay} 秒...")
-                await asyncio.sleep(settings.step_delay)
+                emit_log("info", f"防风控拟人化随机冷却中 (基准: {settings.step_delay} 秒)...")
+                await human_delay(settings.step_delay)
             else:
                 emit_log("info", f"⏩ [断点续跑] 跳过步骤 3 (子号入组)，直接从步骤 {current_start_step} 继续...")
 
@@ -856,7 +926,7 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                     return
 
                 emit_log("success", f"主所有权已成功转移至首选子号 [{primary_child.email}]！")
-                await asyncio.sleep(settings.step_delay)
+                await human_delay(settings.step_delay)
             else:
                 emit_log("info", f"⏩ [断点续跑] 跳过步骤 4 (转移所有权)，直接从步骤 {current_start_step} 继续...")
 
@@ -923,8 +993,8 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
                 if not remaining_children:
                     emit_log("success", f"🎉 所有待分配子号均已交割完毕，批量任务提前圆满完成（已交付 {completed_batches} 批）！")
                     break
-                emit_log("info", f"⏳ [批次 {batch_idx}/{total_batches} 交付成功] 防风控休眠 {settings.step_delay} 秒后自动开启下一批次 (目标子号: [{remaining_children[0].email}])...")
-                await asyncio.sleep(settings.step_delay)
+                emit_log("info", f"⏳ [批次 {batch_idx}/{total_batches} 交付成功] 防风控拟人化休眠 (基准: {settings.step_delay} 秒) 后自动开启下一批次 (目标子号: [{remaining_children[0].email}])...")
+                await human_delay(settings.step_delay)
 
         state.status = "completed"
         state.step_message = f"批量流水线已圆满完成 (共交付 {completed_batches} 个 Team 工作区)" if total_batches > 1 else "全流程已成功完成"
@@ -985,6 +1055,31 @@ async def stop_pipeline():
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
+    u_expected, p_expected = get_auth_credentials()
+    if p_expected:
+        is_authed = False
+        # 1. 检查已通过 BasicAuthMiddleware 注入的会话 Cookie
+        cookie_token = websocket.cookies.get("auth_session")
+        if cookie_token and secrets.compare_digest(cookie_token, get_session_token(p_expected)):
+            is_authed = True
+
+        # 2. 检查 Header Basic Auth
+        if not is_authed:
+            auth_header = websocket.headers.get("authorization")
+            if auth_header and auth_header.startswith("Basic "):
+                try:
+                    encoded = auth_header.split(" ", 1)[1]
+                    decoded = base64.b64decode(encoded).decode("utf-8")
+                    u, p = decoded.split(":", 1)
+                    if secrets.compare_digest(u, u_expected) and secrets.compare_digest(p, p_expected):
+                        is_authed = True
+                except Exception:
+                    pass
+
+        if not is_authed:
+            await websocket.close(code=1008)
+            return
+
     await websocket.accept()
     state.ws_clients.append(websocket)
     try:

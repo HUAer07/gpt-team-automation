@@ -4,10 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ChatGPT Team 自动化协同控制台</title>
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- FontAwesome Icons -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- 预编译零依赖核心样式表 (保证瞬间首屏渲染，彻底免受 CDN 波动影响) -->
+  <link rel="stylesheet" href="/static/app.css">
+  <!-- 本地化 Tailwind CSS (带双 CDN 容灾降级，杜绝样式丢失) -->
+  <script src="/static/tailwind.min.js"></script>
+  <script>
+    if (!window.tailwind) {
+      document.write('<script src="https://cdn.bootcdn.net/ajax/libs/tailwindcss/3.4.1/tailwind.min.js"><\/script>');
+    }
+  </script>
+  <!-- FontAwesome 图标库 (本地优先 + 国内极速镜像兜底) -->
+  <link rel="stylesheet" href="/static/all.min.css">
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -279,8 +287,9 @@
               <input type="text" id="card_name" placeholder="John Doe" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
             </div>
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1">免税州预设快速填入</label>
+              <label class="block text-xs font-medium text-slate-400 mb-1">免税账单预设快速填入</label>
               <select id="tax_free_preset" onchange="applyTaxFreePreset(this.value)" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 focus:outline-none focus:border-brand-500 transition">
+                <option value="co">🇨🇴 哥伦比亚 San Andrés (880001) - 0% 消费税 (推荐)</option>
                 <option value="de">⭐ 特拉华州 Delaware (19801) - 0% 消费税</option>
                 <option value="or">🌲 俄勒冈州 Oregon (97232) - 0% 消费税</option>
                 <option value="mt">🏔️ 蒙大拿州 Montana (59601) - 0% 消费税</option>
@@ -288,33 +297,42 @@
             </div>
           </div>
 
-          <!-- 美国免税地址详情 -->
+          <!-- 免税账单地址配置 -->
           <div class="pt-2 border-t border-slate-800/60">
             <div class="flex items-center justify-between mb-2">
               <span class="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
-                <i class="fa-solid fa-stamp text-[11px]"></i> 美国免税州账单地址 (0% 消费税)
+                <i class="fa-solid fa-stamp text-[11px]"></i> 免税账单地址 (0% 消费税 / 0.00 COP)
               </span>
-              <span class="text-[10px] text-slate-500">Stripe 结算 $0 税费</span>
+              <span class="text-[10px] text-slate-500">Stripe 结算 $0.00 / COP 0.00 税费</span>
             </div>
 
             <div class="space-y-2">
-              <div>
-                <label class="block text-[11px] text-slate-400 mb-0.5">街道地址 (Address Line 1)</label>
-                <input type="text" id="billing_line1" value="1201 N Orange St" placeholder="1201 N Orange St" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand-500">
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-[11px] text-slate-400 mb-0.5">国家/地区 (Country)</label>
+                  <select id="billing_country" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                    <option value="CO">🇨🇴 哥伦比亚 (Colombia)</option>
+                    <option value="US">🇺🇸 美国 (United States)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-[11px] text-slate-400 mb-0.5">街道地址 (Address Line 1)</label>
+                  <input type="text" id="billing_line1" value="Avenida Colombia 1-20" placeholder="Avenida Colombia 1-20" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand-500">
+                </div>
               </div>
 
               <div class="grid grid-cols-3 gap-2">
                 <div>
                   <label class="block text-[11px] text-slate-400 mb-0.5">城市 (City)</label>
-                  <input type="text" id="billing_city" value="Wilmington" placeholder="Wilmington" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                  <input type="text" id="billing_city" value="San Andrés" placeholder="San Andrés" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
                 </div>
                 <div>
-                  <label class="block text-[11px] text-slate-400 mb-0.5">州 (State)</label>
-                  <input type="text" id="billing_state" value="DE" placeholder="DE" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 uppercase font-mono focus:outline-none focus:border-brand-500">
+                  <label class="block text-[11px] text-slate-400 mb-0.5">州/省份 (State / Dept)</label>
+                  <input type="text" id="billing_state" value="San Andrés y Providencia" placeholder="San Andrés y Providencia" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand-500">
                 </div>
                 <div>
-                  <label class="block text-[11px] text-slate-400 mb-0.5">邮政编码 (ZIP)</label>
-                  <input type="text" id="billing_zip" value="19801" placeholder="19801" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-amber-300 font-mono font-bold focus:outline-none focus:border-brand-500">
+                  <label class="block text-[11px] text-slate-400 mb-0.5">邮政编码 (ZIP / Postal)</label>
+                  <input type="text" id="billing_zip" value="880001" placeholder="880001" class="w-full bg-dark-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-amber-300 font-mono font-bold focus:outline-none focus:border-brand-500">
                 </div>
               </div>
             </div>
@@ -969,16 +987,15 @@
         document.getElementById('card_cvc').value = data.card_cvc || '';
         document.getElementById('card_name').value = data.card_name || '';
         document.getElementById('auto_pay').checked = !!data.auto_pay;
-        document.getElementById('billing_line1').value = data.billing_line1 || '1201 N Orange St';
-        document.getElementById('billing_city').value = data.billing_city || 'Wilmington';
-        document.getElementById('billing_state').value = data.billing_state || 'DE';
-        document.getElementById('billing_zip').value = data.billing_zip || '19801';
+        document.getElementById('billing_country').value = data.billing_country || 'CO';
+        document.getElementById('billing_line1').value = data.billing_line1 || 'Avenida Colombia 1-20';
+        document.getElementById('billing_city').value = data.billing_city || 'San Andrés';
+        document.getElementById('billing_state').value = data.billing_state || 'San Andrés y Providencia';
+        document.getElementById('billing_zip').value = data.billing_zip || '880001';
         document.getElementById('yescaptcha_key').value = data.yescaptcha_key || '';
         checkYesCaptchaStatus(data.yescaptcha_key);
 
-        if (data.master_email) {
-          setTimeout(() => checkMasterStatus(false), 800);
-        }
+        // 已关闭自动触发母号检测，改为用户手动在手机/控制台点击【检测母号】或【检查在线】按钮触发
 
       } catch (err) {
         appendLog('error', '获取初始配置失败: ' + err.message);
@@ -986,17 +1003,26 @@
     }
 
     function applyTaxFreePreset(val) {
-      if (val === 'de') {
+      if (val === 'co') {
+        document.getElementById('billing_country').value = 'CO';
+        document.getElementById('billing_line1').value = 'Avenida Colombia 1-20';
+        document.getElementById('billing_city').value = 'San Andrés';
+        document.getElementById('billing_state').value = 'San Andrés y Providencia';
+        document.getElementById('billing_zip').value = '880001';
+      } else if (val === 'de') {
+        document.getElementById('billing_country').value = 'US';
         document.getElementById('billing_line1').value = '1201 N Orange St';
         document.getElementById('billing_city').value = 'Wilmington';
         document.getElementById('billing_state').value = 'DE';
         document.getElementById('billing_zip').value = '19801';
       } else if (val === 'or') {
+        document.getElementById('billing_country').value = 'US';
         document.getElementById('billing_line1').value = '650 NE Holladay St';
         document.getElementById('billing_city').value = 'Portland';
         document.getElementById('billing_state').value = 'OR';
         document.getElementById('billing_zip').value = '97232';
       } else if (val === 'mt') {
+        document.getElementById('billing_country').value = 'US';
         document.getElementById('billing_line1').value = '1300 11th Ave';
         document.getElementById('billing_city').value = 'Helena';
         document.getElementById('billing_state').value = 'MT';
@@ -1039,7 +1065,7 @@
         card_cvc: document.getElementById('card_cvc').value.trim(),
         card_name: document.getElementById('card_name').value.trim(),
         auto_pay: document.getElementById('auto_pay').checked,
-        billing_country: 'US',
+        billing_country: (document.getElementById('billing_country') ? document.getElementById('billing_country').value.trim() : 'CO') || 'CO',
         billing_line1: document.getElementById('billing_line1').value.trim(),
         billing_city: document.getElementById('billing_city').value.trim(),
         billing_state: document.getElementById('billing_state').value.trim(),

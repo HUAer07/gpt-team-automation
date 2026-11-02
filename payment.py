@@ -20,6 +20,7 @@ except ImportError:
 from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
 from auth import AuthSession, get_global_playwright, set_active_browser_page, Authenticator
 from team_client import TeamClient
+from captcha_solver import auto_solve_arkose_in_page
 
 
 class PaymentManager:
@@ -503,6 +504,20 @@ class PaymentManager:
 
             temp_pay_profile.mkdir(parents=True, exist_ok=True)
             ctx = await p.chromium.launch_persistent_context(**launch_kwargs)
+            
+            # 🛡️ 注入反指纹 Stealth 脚本，隐藏 webdriver 特征，提升 Stripe m.stripe.com/6 信任分
+            await ctx.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+            """)
+            
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             set_active_browser_page(page)
 
@@ -624,33 +639,116 @@ class PaymentManager:
             await page.locator("#cardCvc").type(clean_cvc, delay=20)
             await page.locator("#billingName").fill(clean_name)
 
-            # 3. 切换美国免税州地址 (默认 DE 19801)
-            b_country = (card.billing_country or "US").strip()
-            b_state = (card.billing_state or "DE").strip()
-            b_zip = (card.billing_zip or "19801").strip()
-            b_city = (card.billing_city or "Wilmington").strip()
-            b_line1 = (card.billing_line1 or "1201 N Orange St").strip()
+            # 3. 智能账单地址同步 (防跨国欺诈风控 & 支持免税配置)
+            async def _safe_set_admin_area(loc, val: str):
+                if not val or not (await loc.count() > 0 and await loc.is_visible() and not (await loc.is_disabled())):
+                    return
+                try:
+                    tag = (await loc.evaluate("el => el.tagName.toLowerCase()")) or ""
+                except Exception:
+                    tag = ""
+                if tag == "select":
+                    # 使用 JS 智能对齐 options (忽略大小写、重音符号，支持 San Andres / SAP / 模糊匹配)
+                    js_code = """(el, targetVal) => {
+                        const norm = (s) => (s || '').normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase().trim();
+                        const targetNorm = norm(targetVal);
+                        const opts = Array.from(el.options);
+                        
+                        // 1. 精确与包含匹配
+                        let match = opts.find(o => norm(o.text) === targetNorm || norm(o.value) === targetNorm);
+                        if (!match && targetNorm.includes("san andr")) {
+                            match = opts.find(o => norm(o.text).includes("san andr") || norm(o.value).includes("sap") || norm(o.text).includes("providencia"));
+                        }
+                        if (!match) {
+                            match = opts.find(o => norm(o.text).includes(targetNorm.slice(0, 4)) || norm(o.value).includes(targetNorm.slice(0, 4)));
+                        }
+                        // 2. 兜底匹配任意有效省份选项 (非空非占位)
+                        if (!match) {
+                            match = opts.find(o => o.value && o.value !== "" && !norm(o.text).includes("select") && !norm(o.text).includes("department") && !norm(o.text).includes("state"));
+                        }
+                        if (match) {
+                            el.value = match.value;
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            return { ok: true, text: match.text, value: match.value };
+                        }
+                        return { ok: false };
+                    }"""
+                    try:
+                        res = await loc.evaluate(js_code, val)
+                        if res and res.get("ok"):
+                            logger.info(f"已成功选定省份/州 [{res.get('text')}] (value: {res.get('value')})")
+                            return
+                    except Exception as e:
+                        logger.debug(f"JS 设置省份异常: {e}")
+                else:
+                    try:
+                        await loc.fill(val)
+                    except Exception:
+                        pass
 
-            logger.info(f"正在同步免税州账单地址 ({b_line1}, {b_city}, {b_state} {b_zip})...")
+            b_country = (card.billing_country or "US").strip().upper()
             country_loc = page.locator("#billingCountry")
+            
+            # 检测当前结算页面默认选中的国家代码 (例如出口 IP 是 CO 时默认往往是 CO)
+            curr_c = ""
             if await country_loc.count() > 0 and not (await country_loc.is_disabled()):
-                curr_c = await country_loc.input_value()
-                if curr_c != b_country:
+                curr_c = (await country_loc.input_value() or "").strip().upper()
+            
+            # 检测是否为哥伦比亚订单场景 (配置为 CO / 页面原选 CO / 出口代理为 CO / 币种为 COP)
+            # 只要属于哥伦比亚场景，强制统一锁定为哥伦比亚免税特区 (San Andrés, 880001)，避免被前端残留的 US 覆盖
+            is_colombia = (
+                (b_country == "CO") or 
+                (curr_c == "CO") or 
+                (pay_country == "CO") or
+                ("COP" in (await page.content() or ""))
+            )
+            
+            if is_colombia:
+                logger.info("🇨🇴 锁定哥伦比亚 0% IVA 免税特区地址 (San Andrés 880001，与出口 IP 完全对齐)...")
+                if curr_c != "CO" and await country_loc.count() > 0 and not (await country_loc.is_disabled()):
+                    await country_loc.select_option("CO")
+                    await asyncio.sleep(1.2)
+                
+                co_line1 = card.billing_line1 if (card.billing_country == "CO" and card.billing_line1) else "Avenida Colombia 1-20"
+                co_city = card.billing_city if (card.billing_country == "CO" and card.billing_city) else "San Andrés"
+                co_state = card.billing_state if (card.billing_country == "CO" and card.billing_state) else "San Andrés y Providencia"
+                co_zip = card.billing_zip if (card.billing_country == "CO" and card.billing_zip) else "880001"
+                
+                line1_loc = page.locator("#billingAddressLine1")
+                if await line1_loc.is_visible() and not (await line1_loc.is_disabled()):
+                    await line1_loc.fill(co_line1)
+                city_loc = page.locator("#billingLocality")
+                if await city_loc.is_visible() and not (await city_loc.is_disabled()):
+                    await city_loc.fill(co_city)
+                state_loc = page.locator("#billingAdministrativeArea")
+                await _safe_set_admin_area(state_loc, co_state)
+                zip_loc = page.locator("#billingPostalCode")
+                if await zip_loc.is_visible() and not (await zip_loc.is_disabled()):
+                    await zip_loc.fill(co_zip)
+            
+            elif b_country and b_country != "AUTO":
+                if curr_c != b_country and await country_loc.count() > 0 and not (await country_loc.is_disabled()):
+                    logger.info(f"正在同步账单国家为: {b_country}...")
                     await country_loc.select_option(b_country)
                     await asyncio.sleep(1.2)
+                
+                b_state = (card.billing_state or "DE").strip()
+                b_zip = (card.billing_zip or "19801").strip()
+                b_city = (card.billing_city or "Wilmington").strip()
+                b_line1 = (card.billing_line1 or "1201 N Orange St").strip()
 
-            line1_loc = page.locator("#billingAddressLine1")
-            if await line1_loc.is_visible() and not (await line1_loc.is_disabled()):
-                await line1_loc.fill(b_line1)
-            city_loc = page.locator("#billingLocality")
-            if await city_loc.is_visible() and not (await city_loc.is_disabled()):
-                await city_loc.fill(b_city)
-            state_loc = page.locator("#billingAdministrativeArea")
-            if await state_loc.is_visible() and not (await state_loc.is_disabled()):
-                await state_loc.select_option(b_state)
-            zip_loc = page.locator("#billingPostalCode")
-            if await zip_loc.is_visible() and not (await zip_loc.is_disabled()):
-                await zip_loc.fill(b_zip)
+                line1_loc = page.locator("#billingAddressLine1")
+                if await line1_loc.is_visible() and not (await line1_loc.is_disabled()):
+                    await line1_loc.fill(b_line1)
+                city_loc = page.locator("#billingLocality")
+                if await city_loc.is_visible() and not (await city_loc.is_disabled()):
+                    await city_loc.fill(b_city)
+                state_loc = page.locator("#billingAdministrativeArea")
+                await _safe_set_admin_area(state_loc, b_state)
+                zip_loc = page.locator("#billingPostalCode")
+                if await zip_loc.is_visible() and not (await zip_loc.is_disabled()):
+                    await zip_loc.fill(b_zip)
             await asyncio.sleep(1.5)
 
             # 4. 自动勾选服务条款复选框 (#termsOfServiceConsentCheckbox)
@@ -714,7 +812,7 @@ class PaymentManager:
                         except Exception:
                             pass
 
-                # 4. 检测 Arkose Labs / FunCaptcha 3D 拼图质询 (机房 IP 风控触发)
+                # 4. 检测 Arkose Labs / FunCaptcha 3D 拼图与闭合环物理拖拽质询
                 is_arkose = False
                 for f in page.frames:
                     f_url = f.url or ""
@@ -730,39 +828,57 @@ class PaymentManager:
                     except Exception:
                         pass
 
+                if not is_arkose:
+                    # 探测是否出现闭合环物理拖拽题型
+                    for f in page.frames:
+                        try:
+                            if await f.locator("text=/drag the shape to the loop|loop that is closed/i").count() > 0:
+                                is_arkose = True
+                                break
+                        except Exception:
+                            pass
+
                 if is_arkose:
                     if not challenge_alerted:
                         challenge_alerted = True
                         logger.warning("=" * 70)
                         logger.warning("🔔 【检测到 Stripe 弹出 Arkose 人机验证拼图】")
-                        logger.info("🤖 已由 YesCaptcha 打码插件自动接管：正在调用 AI 视觉模型分析并自动点击答案...")
+                        logger.info("🤖 正在启动 AI 视觉模型主动识别画面并精准模拟坐标点击...")
                         logger.info("💡 提示：您也可以在 Web 控制台【实时画面】辅助点击，或复制支付长链用手机 4G/5G 秒付")
                         logger.warning("=" * 70)
+
+                    # 🚀 主动调用 Arkose 图像识别与坐标模拟点击 (支持找不同、坐标点击等新题型)
+                    try:
+                        solved = await auto_solve_arkose_in_page(page)
+                        if solved:
+                            await asyncio.sleep(2.0)
+                    except Exception as arkose_err:
+                        logger.debug(f"主动解题探测异常: {arkose_err}")
+
                 elif challenge_alerted and not is_arkose:
-                    logger.success("✨ 【YesCaptcha 拼图攻克完成】Arkose 质询弹窗已消除，等待 Stripe 结算确认...")
+                    logger.success("✨ 【Arkose 质询攻克完成】验证弹窗已消除，等待 Stripe 结算确认...")
                     challenge_alerted = False
 
-                # 5. 检查是否有弹出可见的 hCaptcha 复选框
-                if not hcaptcha_clicked:
-                    for f in page.frames:
-                        f_url = f.url or ""
-                        if "hcaptcha.com" in f_url and "invisible" not in f_url:
-                            try:
-                                cb = f.locator("#checkbox")
-                                if await cb.is_visible():
-                                    chk = await cb.get_attribute("aria-checked")
-                                    if chk != "true":
+                # 5. 持续检测并自动勾选可见的 hCaptcha 复选框
+                for f in page.frames:
+                    f_url = f.url or ""
+                    if "hcaptcha.com" in f_url and "invisible" not in f_url:
+                        try:
+                            cb = f.locator("#checkbox, [aria-label*='human'], [role='checkbox']").first
+                            if await cb.count() > 0 and await cb.is_visible():
+                                chk = await cb.get_attribute("aria-checked")
+                                if chk != "true":
+                                    logger.info("⚡ 检测到 Stripe hCaptcha [I am human] 复选框，正在模拟真实点击...")
+                                    try:
+                                        await cb.click(force=True, timeout=2000)
+                                    except Exception:
                                         box = await cb.bounding_box()
                                         if box:
-                                            logger.info("检测到 Stripe hCaptcha 验证框，正在模拟点击 [I am human]...")
-                                            await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=10)
-                                            await asyncio.sleep(0.1)
                                             await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                                            hcaptcha_clicked = True
-                                            await asyncio.sleep(2.0)
-                                            break
-                            except Exception:
-                                pass
+                                    await asyncio.sleep(2.0)
+                                    break
+                        except Exception:
+                            pass
 
                 await asyncio.sleep(1.0)
 
