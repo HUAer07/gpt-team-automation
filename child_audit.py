@@ -79,7 +79,7 @@ async def audit_one(account: AccountConfig, p, close_after: bool = True) -> Chil
             rep.detail = "没有任何空间（未入组或已被移出）"
         else:
             rep.detail = "正常"
-        logger.info("[子号体检] %s", rep.brief())
+        logger.info(f"[子号体检] {rep.brief()}")
         return rep
     except Exception as e:
         rep.status = "error"
