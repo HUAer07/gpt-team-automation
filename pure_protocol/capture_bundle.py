@@ -55,13 +55,14 @@ JS_PK = r"""
 
 class BundleCapture:
     def __init__(self, url: str, out: str, autofill: bool, wait_s: int, proxy: Optional[str],
-                 email: str = ""):
+                 email: str = "", card: Optional[CardConfig] = None):
         self.url = url
         self.out = Path(out)
         self.autofill = autofill
         self.wait_s = wait_s
         self.proxy = proxy
         self.email = (email or "").strip()
+        self.card_cfg = card
         self.data: Dict[str, Any] = {
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "checkout_url": url,
@@ -119,7 +120,7 @@ class BundleCapture:
             logger.debug(f"抓响应失败: {e}")
 
     async def run(self) -> int:
-        card = CardConfig()
+        card = self.card_cfg or CardConfig()
         launch_args = ["--no-sandbox", "--disable-setuid-sandbox",
                        "--disable-blink-features=AutomationControlled", "--password-store=basic"]
         prof = Path("browser_profiles") / f"pure_capture_{int(time.time())}"
@@ -345,9 +346,28 @@ def main(argv=None) -> int:
     ap.add_argument("--wait", type=int, default=180, help="等 /confirm 的秒数")
     ap.add_argument("--proxy", default="", help="覆盖代理")
     ap.add_argument("--email", default="", help="账单邮箱（REQUIRED，默认用母号邮箱/占位）")
+    ap.add_argument("--number", default="", help="覆盖卡号（换卡不一定要改 .env）")
+    ap.add_argument("--exp", default="", help="覆盖有效期 MM/YY")
+    ap.add_argument("--cvc", default="", help="覆盖 CVC")
+    ap.add_argument("--name", default="", help="覆盖持卡人")
+    ap.add_argument("--country", default="", help="覆盖账单国家，如 US")
+    ap.add_argument("--state", default="", help="覆盖州/省代码，如 DE")
+    ap.add_argument("--zip", default="", help="覆盖邮编")
+    ap.add_argument("--line1", default="", help="覆盖地址行1")
+    ap.add_argument("--city", default="", help="覆盖城市")
     a = ap.parse_args(argv)
     email = a.email or (settings.master.email or "")
-    cap = BundleCapture(a.url, a.out, a.autofill, a.wait, a.proxy.strip() or None, email)
+    card = CardConfig()
+    override = {}
+    for key, val in (("card_number", a.number), ("card_exp", a.exp), ("card_cvc", a.cvc),
+                     ("card_name", a.name), ("billing_country", a.country), ("billing_state", a.state),
+                     ("billing_zip", a.zip), ("billing_line1", a.line1), ("billing_city", a.city)):
+        if val:
+            override[key] = val
+    if override:
+        card = card.model_copy(update=override)
+        logger.info(f"卡片参数覆盖: {sorted(override.keys())} | 尾号 {card.card_number[-4:]}")
+    cap = BundleCapture(a.url, a.out, a.autofill, a.wait, a.proxy.strip() or None, email, card)
     return asyncio.run(cap.run())
 
 
