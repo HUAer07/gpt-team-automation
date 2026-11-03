@@ -160,6 +160,7 @@ class ThreeDSBridge:
             logger.info(f"打开 {self.url[:90]}…")
             await page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(5.0)
+            await self._shot(page)
 
             await self._fill(page)
             self.result["stage"] = "submitted"
@@ -219,25 +220,51 @@ class ThreeDSBridge:
             await ctx.close()
         return 0 if self.result.get("ok") else 4
 
+    async def _safe_fill(self, page, sel: str, val: str, label: str = "") -> bool:
+        """字段可能只读/禁用（二次进入同一 session 时常见），逐字段容错，不整段卡死。"""
+        try:
+            el = page.locator(sel)
+            if await el.count() == 0:
+                return False
+            if not await el.is_visible():
+                return False
+            if not await el.is_enabled():
+                logger.info(f"{label or sel} 已禁用/只读，跳过")
+                return False
+            await el.fill(val, timeout=8000)
+            return True
+        except Exception as e:
+            logger.debug(f"{label or sel} 填写失败: {e}")
+            return False
+
     async def _fill(self, page) -> None:
         card = self.card
-        # 邮箱
-        e = page.locator("#email")
-        if await e.count() > 0 and not await e.input_value():
-            await e.fill("billing@example.com")
+        await self._safe_fill(page, "#email", "billing@example.com", "邮箱")
         num = re.sub(r"[\s-]", "", card.card_number)
         exp = re.sub(r"[\s/]", "", card.card_exp)
         loc = page.locator("#cardNumber")
-        await loc.wait_for(state="visible", timeout=25000)
-        await loc.click()
-        await loc.type(num, delay=20)
-        await page.locator("#cardExpiry").click()
-        await page.locator("#cardExpiry").type(exp, delay=20)
-        await page.locator("#cardCvc").click()
-        await page.locator("#cardCvc").type((card.card_cvc or "").strip(), delay=20)
-        n = page.locator("#billingName")
-        if await n.count() > 0:
-            await n.fill((card.card_name or "ChatGPT User").strip())
+        try:
+            await loc.wait_for(state="visible", timeout=25000)
+        except Exception:
+            logger.warning("卡号框未出现（可能该 session 已存支付方式），尝试直接找提交按钮")
+        else:
+            try:
+                if await loc.is_enabled():
+                    await loc.click()
+                    await loc.type(num, delay=20)
+                    e2 = page.locator("#cardExpiry")
+                    if await e2.is_enabled():
+                        await e2.click()
+                        await e2.type(exp, delay=20)
+                    c2 = page.locator("#cardCvc")
+                    if await c2.is_enabled():
+                        await c2.click()
+                        await c2.type((card.card_cvc or "").strip(), delay=20)
+                else:
+                    logger.info("卡号框已禁用/预填，跳过卡输入")
+            except Exception as e:
+                logger.warning(f"卡字段输入异常: {e}")
+        await self._safe_fill(page, "#billingName", (card.card_name or "ChatGPT User").strip(), "持卡人")
 
         want_c = (card.billing_country or "US").upper()
         c_loc = page.locator("#billingCountry")
@@ -250,11 +277,8 @@ class ThreeDSBridge:
                 except Exception:
                     pass
 
-        for sel, val in (("#billingAddressLine1", card.billing_line1),
-                         ("#billingLocality", card.billing_city)):
-            el = page.locator(sel)
-            if val and await el.count() > 0:
-                await el.fill(val)
+        await self._safe_fill(page, "#billingAddressLine1", card.billing_line1 or "", "地址行1")
+        await self._safe_fill(page, "#billingLocality", card.billing_city or "", "城市")
         try:
             await page.keyboard.press("Escape")
         except Exception:
@@ -270,9 +294,7 @@ class ThreeDSBridge:
                            || Array.from(el.options).find(x => norm(x.text).startsWith(want));
                     if (o) { el.value = o.value; el.dispatchEvent(new Event('change', {bubbles:true})); }
                 }""", card.billing_state or "OR")
-        z = page.locator("#billingPostalCode")
-        if await z.count() > 0:
-            await z.fill(card.billing_zip or "")
+        await self._safe_fill(page, "#billingPostalCode", card.billing_zip or "", "邮编")
         tos = page.locator("#termsOfServiceConsentCheckbox")
         if await tos.count() > 0 and not await tos.is_checked():
             await tos.check(force=True)
