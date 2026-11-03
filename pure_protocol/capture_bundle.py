@@ -355,10 +355,26 @@ def main(argv=None) -> int:
     ap.add_argument("--zip", default="", help="覆盖邮编")
     ap.add_argument("--line1", default="", help="覆盖地址行1")
     ap.add_argument("--city", default="", help="覆盖城市")
+    ap.add_argument("--card-file", default="", help="卡片文件(key=value 每行一个)，避免卡号出现在命令行/ps")
     a = ap.parse_args(argv)
     email = a.email or (settings.master.email or "")
     card = CardConfig()
     override = {}
+    if a.card_file:
+        pf = Path(a.card_file)
+        if pf.exists():
+            for line in pf.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                key = {"number": "card_number", "exp": "card_exp", "cvc": "card_cvc",
+                       "name": "card_name", "country": "billing_country", "state": "billing_state",
+                       "zip": "billing_zip", "line1": "billing_line1", "city": "billing_city"}.get(k.strip(), k.strip())
+                override[key] = v.strip().strip('\'"')
+            logger.info(f"已读取卡片文件: {pf}")
+        else:
+            logger.warning(f"卡片文件不存在: {pf}")
     for key, val in (("card_number", a.number), ("card_exp", a.exp), ("card_cvc", a.cvc),
                      ("card_name", a.name), ("billing_country", a.country), ("billing_state", a.state),
                      ("billing_zip", a.zip), ("billing_line1", a.line1), ("billing_city", a.city)):
