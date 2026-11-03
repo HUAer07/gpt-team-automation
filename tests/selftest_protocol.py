@@ -1,0 +1,182 @@
+# -*- coding: utf-8 -*-
+"""协议支付引擎自检（不联网、不启动浏览器）
+
+用 FakePage 模拟 checkout 页面的 evaluate 返回，验证三段式流程：
+    init 嗅探 -> createPaymentMethod -> SetupIntent(off_session) -> confirm -> mandate 落库
+
+    venv/bin/python -m tests.selftest_protocol
+"""
+import asyncio
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("PAYMENT_MANDATE_DIR", tempfile.mkdtemp(prefix="mandates_"))
+
+from config import CardConfig  # noqa: E402
+import payment_protocol as pp  # noqa: E402
+
+
+class FakeResponse:
+    def __init__(self, url, payload, status=200):
+        self.url = url
+        self.status = status
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+class FakePage:
+    """按 JS 片段里的特征分派，模拟页面内 Stripe.js 与 fetch 的返回。"""
+
+    def __init__(self, decline=False, no_stripe_js=False):
+        self.url = "https://checkout.stripe.com/c/pay/cs_live_TEST123"
+        self.handlers = {}
+        self.decline = decline
+        self.no_stripe_js = no_stripe_js
+        self.forms = []
+        self.gotos = []
+
+    def on(self, event, cb):
+        self.handlers.setdefault(event, []).append(cb)
+
+    async def goto(self, url, **kw):
+        self.gotos.append(url)
+        self.url = url
+
+    async def fire_response(self, url, payload, status=200):
+        for cb in self.handlers.get("response", []):
+            await cb(FakeResponse(url, payload, status))
+
+    async def evaluate(self, js, arg=None):
+        arg = arg or {}
+        if "createPaymentMethod" in js:
+            if self.no_stripe_js:
+                return {"ok": False, "error": "stripe_js_absent"}
+            if self.decline:
+                return {"ok": False, "error": "card_declined:Your card was declined."}
+            return {"ok": True, "id": "pm_1TestPmAbc", "brand": "visa", "last4": "4242"}
+        if "data-checkout-session" in js or "__INITIAL_STATE__" in js:
+            return {"guid": "guid_dom_fallback", "state_keys": ["guid", "session"]}
+        if "pk_(?:live|test)" in js:
+            return "pk_live_51TestPublishableKey"
+        url = arg.get("url", "")
+        if "setup_intents" in url:
+            self.forms.append(("setup_intents", arg.get("form")))
+            return {"status": 200, "json": {"id": "seti_1TestSeti", "status": "requires_payment_method"}}
+        if "/payment_pages/" in url and "confirm" in url:
+            self.forms.append(("confirm", arg.get("form")))
+            if self.decline:
+                return {"status": 402, "json": {"error": {"code": "card_declined",
+                                                          "decline_code": "generic_decline",
+                                                          "message": "Your card was declined."}}}
+            return {"status": 200, "json": {
+                "status": "complete", "payment_status": "paid",
+                "payment_intent": {"id": "pi_1TestPi", "status": "succeeded", "customer": "cus_1TestCus"},
+            }}
+        if "/payment_pages/" in url:
+            return {"status": 200, "json": {"status": "complete", "payment_status": "paid"}}
+        return {"status": 404, "json": {}, "text": "not found"}
+
+
+def card():
+    return CardConfig(
+        card_number="4242 4242 4242 4242", card_exp="12/29", card_cvc="123",
+        card_name="Test Holder", billing_country="US", billing_line1="1201 N Orange St",
+        billing_city="Wilmington", billing_state="DE", billing_zip="19801",
+    )
+
+
+async def scenario_ok():
+    page = FakePage()
+    payer = pp.StripeProtocolPayer(page, card(), email="master@example.com")
+    await payer.attach()
+    # 模拟 checkout 页面加载时真实发出的 /payment_pages/{cs}/init
+    await page.fire_response(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/init",
+        {"guid": "guid_from_init", "currency": "usd",
+         "total_summary": {"due": 6000, "subtotal": 6000}, "customer": "cus_init_hint"},
+    )
+    out = await payer.pay()
+    assert out.ok, out.brief()
+    assert out.stage == "done", out.stage
+    assert out.pi_id == "pi_1TestPi", out.pi_id
+    assert out.payment_method == "pm_1TestPmAbc", out.payment_method
+    assert out.setup_intent == "seti_1TestSeti", out.setup_intent
+    assert out.amount == 6000 and out.currency == "usd", (out.amount, out.currency)
+    # confirm 必须带上 expected_amount / guid / payment_method
+    confirm_form = dict(page.forms)["confirm"]
+    assert confirm_form["payment_method"] == "pm_1TestPmAbc", confirm_form
+    assert confirm_form["expected_amount"] == "6000", confirm_form
+    assert confirm_form["guid"] == "guid_from_init", confirm_form
+    # mandate 落盘
+    mpath = Path(out.mandate_path)
+    assert mpath.exists(), mpath
+    saved = json.loads(mpath.read_text(encoding="utf-8"))
+    assert saved["payment_method"] == "pm_1TestPmAbc"
+    assert saved["mode"] == "protocol_off_session"
+    assert saved["amount"] == 6000
+    print("[ok] 正常扣款链路: stage=%s amount=%s %s pi=%s seti=%s mandate=%s" % (
+        out.stage, out.amount, out.currency, out.pi_id, out.setup_intent, mpath.name))
+    return out
+
+
+async def scenario_declined():
+    page = FakePage(decline=True)
+    payer = pp.StripeProtocolPayer(page, card(), email="master@example.com")
+    await payer.attach()
+    await page.fire_response(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/init",
+        {"guid": "guid_x", "currency": "usd", "total_summary": {"due": 6000}},
+    )
+    out = await payer.pay()
+    assert not out.ok, out.brief()
+    assert out.code == "card_declined", out.code
+    # 卡被拒时不应回落 UI（UI 也是同一张卡，白跑）
+    assert out.fallback_ok is False, out.brief()
+    print("[ok] 拒卡链路: stage=%s code=%s fallback_ok=%s" % (out.stage, out.code, out.fallback_ok))
+
+
+async def scenario_no_stripe_js():
+    page = FakePage(no_stripe_js=True)
+    payer = pp.StripeProtocolPayer(page, card())
+    await payer.attach()
+    await page.fire_response(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/init",
+        {"guid": "g", "currency": "usd", "total_summary": {"due": 6000}},
+    )
+    out = await payer.pay()
+    assert not out.ok
+    assert out.fallback_ok is True, out.brief()
+    print("[ok] 页面无 Stripe.js: fallback_ok=%s -> 交由 UI 通道" % out.fallback_ok)
+
+
+async def scenario_no_session():
+    page = FakePage()
+    payer = pp.StripeProtocolPayer(page, card())
+    await payer.attach()
+    out = await payer.pay()
+    assert not out.ok and out.stage == "init", out.brief()
+    print("[ok] 无 checkout session 提示: stage=%s fallback_ok=%s" % (out.stage, out.fallback_ok))
+
+
+async def main():
+    print("mandate dir:", os.environ["PAYMENT_MANDATE_DIR"])
+    await scenario_ok()
+    await scenario_declined()
+    await scenario_no_stripe_js()
+    await scenario_no_session()
+    rows = pp.list_mandates()
+    assert len(rows) == 1, rows
+    print("[ok] list_mandates() ->", len(rows), "条; customer=", rows[0]["customer"])
+    print("\nALL PROTOCOL SELFTESTS PASSED")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

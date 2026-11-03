@@ -21,6 +21,26 @@ from config import settings, CardConfig, get_playwright_proxy, get_httpx_proxy
 from auth import AuthSession, get_global_playwright, set_active_browser_page, Authenticator
 from team_client import TeamClient
 from captcha_solver import auto_solve_arkose_in_page
+from payment_protocol import (
+    PayOutcome,
+    StripeProtocolPayer,
+    list_mandates,
+    protocol_enabled,
+    ui_fallback_enabled,
+)
+
+# 反指纹注入脚本（协议通道与 UI 兜底通道共用）
+STEALTH_INIT_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+window.chrome = {
+    runtime: {},
+    loadTimes: function() {},
+    csi: function() {},
+    app: {}
+};
+"""
 
 
 class PaymentManager:
@@ -28,6 +48,8 @@ class PaymentManager:
         self.session = master_session
         self.base_url = "https://chatgpt.com/backend-api"
         self.last_used_promo: Optional[str] = None
+        # 最近一次支付的协议级结果（server.py 用来打日志/落库展示）
+        self.last_outcome: Optional[PayOutcome] = None
 
     async def _detect_proxy_country(self, proxy_str: Optional[str]) -> Optional[str]:
         """通过指定代理请求 Cloudflare trace 识别代理出口国家代码 (如 CO / US / TR)"""
@@ -426,14 +448,150 @@ class PaymentManager:
                 pass
 
     async def auto_pay_stripe(self, p, checkout_url: str, card: CardConfig) -> bool:
+        """支付总入口：协议通道优先，失败按开关回落 UI 填表。
+
+        协议通道 = 绑卡生成 pm_xxx -> SetupIntent(off_session) 存 mandate
+                 -> payment_pages/{cs}/confirm 首单扣款 -> mandate 落库复用
+        UI 通道   = 页面填卡 -> 点提交（原逻辑，保留作兜底）
         """
-        基于真实抓包逆向的 Stripe 协议监控 + 浏览器原生 HSW 签名混合代付引擎：
+        if protocol_enabled():
+            try:
+                outcome = await self._auto_pay_protocol(p, checkout_url, card)
+            except Exception as e:
+                logger.warning(f"协议支付通道异常，准备回落 UI 通道: {e}")
+                outcome = PayOutcome(stage="init", reason=str(e), fallback_ok=True)
+            self.last_outcome = outcome
+            if outcome.ok:
+                logger.success(
+                    f"协议支付完成 → stage={outcome.stage} 金额={outcome.amount} "
+                    f"{outcome.currency.upper()} pi={outcome.pi_id or '-'} "
+                    f"seti={outcome.setup_intent or '-'} mandate={outcome.mandate_path or '-'}"
+                )
+                return True
+            logger.warning(
+                f"协议通道未完成: stage={outcome.stage} code={outcome.code or '-'} "
+                f"reason={outcome.reason or '-'}"
+            )
+            if not (ui_fallback_enabled() and outcome.fallback_ok):
+                return False
+            logger.info("↩️ 回落 UI 填表通道继续支付...")
+        return await self._auto_pay_stripe_ui(p, checkout_url, card)
+
+    async def _launch_pay_page(self, p, card: CardConfig):
+        """启动 Stripe 代付专用隔离浏览器（协议通道与 UI 兜底通道共用一套启动参数）"""
+        has_xvfb = bool(os.environ.get("DISPLAY"))
+        win_w, win_h = (1920, 1080) if has_xvfb else (1280, 800)
+        ext_dir = Path(__file__).parent / "extensions" / "yescaptcha"
+        has_ext = ext_dir.exists() and (ext_dir / "manifest.json").exists()
+
+        launch_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--disable-save-password-bubble",
+            "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
+            f"--window-size={win_w},{win_h}",
+            "--window-position=0,0",
+            "--password-store=basic",
+        ]
+        if has_ext:
+            launch_args.append(f"--disable-extensions-except={ext_dir}")
+            launch_args.append(f"--load-extension={ext_dir}")
+            logger.info("🛡️ 支付流程已挂载 YesCaptcha 自动打码扩展")
+
+        is_headless = False
+        if not has_xvfb and (settings.headless or sys.platform.startswith("linux")):
+            launch_args.append("--headless=new")
+
+        temp_pay_profile = Path(__file__).parent / "browser_profiles" / f"stripe_pay_{uuid.uuid4().hex[:8]}"
+        temp_pay_profile.mkdir(parents=True, exist_ok=True)
+
+        launch_kwargs: Dict[str, Any] = {
+            "user_data_dir": str(temp_pay_profile),
+            "headless": is_headless,
+            "proxy": get_playwright_proxy(settings.http_proxy),
+            "args": launch_args,
+            "ignore_default_args": ["--enable-automation", "--disable-extensions"],
+            "viewport": {"width": win_w, "height": win_h},
+            "locale": "en-US",
+            "timezone_id": "America/New_York",
+        }
+        if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
+            launch_kwargs["channel"] = "chrome"
+
+        ctx = await p.chromium.launch_persistent_context(**launch_kwargs)
+        await ctx.add_init_script(STEALTH_INIT_JS)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        set_active_browser_page(page)
+        return ctx, page, temp_pay_profile
+
+    async def _auto_pay_protocol(self, p, checkout_url: str, card: CardConfig) -> PayOutcome:
+        """协议支付通道：不填表、不点提交，直接走 Stripe 协议层（绑卡 -> confirm -> 落库）。"""
+        logger.info("⚡ 启动 Stripe 协议支付引擎 (绑卡 mandate -> confirm -> mandate 落库)...")
+        logger.info(
+            f"卡号末尾: {card.card_number[-4:] if len(card.card_number) >= 4 else '****'} | "
+            f"持卡人: {card.card_name or 'ChatGPT User'}"
+        )
+
+        pay_proxy_dict = get_playwright_proxy(settings.http_proxy)
+        if pay_proxy_dict:
+            pay_country = await self._detect_proxy_country(settings.http_proxy)
+            logger.info(
+                f"🌐 协议通道已挂载【常用代理】: {pay_proxy_dict.get('server')} "
+                f"(出口国家: {pay_country or 'US'})"
+            )
+        else:
+            logger.info("🌐 协议通道使用【服务器直连】")
+
+        ctx = None
+        temp_pay_profile = None
+        try:
+            ctx, page, temp_pay_profile = await self._launch_pay_page(p, card)
+            payer = StripeProtocolPayer(page, card, email=getattr(self.session, "email", "") or "")
+            await payer.attach()
+
+            logger.info("加载 Stripe 结算上下文（协议通道只需 init 报价，无需预热填表）...")
+            await page.goto(checkout_url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(4.0)
+
+            outcome = await payer.pay()
+
+            if outcome.ok and self.session.page and not self.session.page.is_closed():
+                try:
+                    await self.session.page.goto(
+                        "https://chatgpt.com/", wait_until="domcontentloaded", timeout=20000
+                    )
+                except Exception:
+                    pass
+            return outcome
+        finally:
+            if self.session.page and not self.session.page.is_closed():
+                set_active_browser_page(self.session.page)
+            if ctx:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            if temp_pay_profile and Path(temp_pay_profile).exists():
+                try:
+                    shutil.rmtree(temp_pay_profile, ignore_errors=True)
+                except Exception:
+                    pass
+
+    def list_mandates(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """列出已落库的协议支付 mandate（供控制台展示）"""
+        return list_mandates(limit)
+
+    async def _auto_pay_stripe_ui(self, p, checkout_url: str, card: CardConfig) -> bool:
+        """
+        UI 填表兜底通道（原协议监控引擎，协议通道不可用时使用）：
         1. 强制挂载【常用代理 (http_proxy)】(美国住宅出口 IP 与美国卡/DE免税州一致，完全隔离锁区提链代理)
         2. 实时嗅探 /v1/payment_pages/{cs_id}/init、税费核算、/v1/payment_methods 与 /confirm 协议报文
         3. 由页面原生生成加密 passive_captcha_token (P1_eyJ...)、rv_timestamp 与 m.stripe.com/6 42位签名指纹
         4. 自动勾选 termsOfServiceConsentCheckbox 并触发原生 custom_checkout_beta=v1 协议提交，秒级捕获银行真实返回码
         """
-        logger.info("⚡ 启动 Stripe 协议级混合代付引擎 (原生 HSW 签名 + 实时协议报文监控)...")
+        logger.info("⚡ 启动 Stripe UI 填表代付引擎 (原生 HSW 签名 + 实时协议报文监控)...")
         logger.info(f"卡号末尾: {card.card_number[-4:] if len(card.card_number) >= 4 else '****'} | 持卡人: {card.card_name or 'ChatGPT User'}")
 
         if p is None:
@@ -457,69 +615,12 @@ class PaymentManager:
         browser = None
         ctx = None
         page = None
-        temp_pay_profile = Path(__file__).parent / "browser_profiles" / f"stripe_pay_{uuid.uuid4().hex[:8]}"
+        temp_pay_profile = None
         confirm_future = asyncio.get_running_loop().create_future()
         logged_tax = False
 
         try:
-            has_xvfb = bool(os.environ.get("DISPLAY"))
-            win_w, win_h = (1920, 1080) if has_xvfb else (1280, 800)
-            
-            # 检测并加载 YesCaptcha 自动打码扩展
-            ext_dir = Path(__file__).parent / "extensions" / "yescaptcha"
-            has_ext = ext_dir.exists() and (ext_dir / "manifest.json").exists()
-
-            launch_args = [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--disable-save-password-bubble",
-                "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage",
-                f"--window-size={win_w},{win_h}",
-                "--window-position=0,0",
-                "--password-store=basic",
-            ]
-            if has_ext:
-                launch_args.append(f"--disable-extensions-except={ext_dir}")
-                launch_args.append(f"--load-extension={ext_dir}")
-                logger.info("🛡️ Stripe 支付流程已挂载 YesCaptcha 自动打码扩展，将全自动攻克 Arkose 拼图与人机质询！")
-
-            is_headless = False
-            if not has_xvfb and (settings.headless or sys.platform.startswith("linux")):
-                launch_args.append("--headless=new")
-
-            launch_kwargs: Dict[str, Any] = {
-                "user_data_dir": str(temp_pay_profile),
-                "headless": is_headless,
-                "proxy": pay_proxy_dict,
-                "args": launch_args,
-                "ignore_default_args": ["--enable-automation", "--disable-extensions"],
-                "viewport": {"width": win_w, "height": win_h},
-                "locale": "en-US",
-                "timezone_id": "America/New_York",
-            }
-            if os.path.exists("/usr/bin/google-chrome") or os.path.exists("/Applications/Google Chrome.app"):
-                launch_kwargs["channel"] = "chrome"
-
-            temp_pay_profile.mkdir(parents=True, exist_ok=True)
-            ctx = await p.chromium.launch_persistent_context(**launch_kwargs)
-            
-            # 🛡️ 注入反指纹 Stealth 脚本，隐藏 webdriver 特征，提升 Stripe m.stripe.com/6 信任分
-            await ctx.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            window.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {},
-                app: {}
-            };
-            """)
-            
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            set_active_browser_page(page)
+            ctx, page, temp_pay_profile = await self._launch_pay_page(p, card)
 
             async def on_stripe_response(resp):
                 nonlocal logged_tax

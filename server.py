@@ -654,6 +654,26 @@ async def manual_extract_link():
         emit_log("error", f"提取长链异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/payment/mandates")
+async def get_payment_mandates():
+    """查看已落库的协议支付 mandate（customer / payment_method / 金额 / 卡尾号）
+
+    每笔成功的协议支付都会在 data/mandates/ 留一条记录，后续补扣、换卡、核验都从
+    customer + payment_method 出发；续费由 Stripe 订阅侧自动 off_session 扣款。
+    """
+    try:
+        from payment_protocol import list_mandates, protocol_enabled, ui_fallback_enabled
+        rows = list_mandates(50)
+        return {
+            "status": "success",
+            "count": len(rows),
+            "protocol_enabled": protocol_enabled(),
+            "ui_fallback_enabled": ui_fallback_enabled(),
+            "mandates": rows,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 def consume_used_promo(promo_to_remove: str):
     """当优惠码成功核销或支付完成后，自动从内存列表与 .env 中剔除该优惠码并同步至前端"""
     if not promo_to_remove or not settings.card.promo_codes:
@@ -799,8 +819,21 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
 
                 # 检查是否开启自动代付
                 if settings.card.auto_pay and settings.card.card_number:
-                    emit_log("info", "检测到已开启【自动代付】，正在通过 Stripe 纯协议直连通道提交信用卡结算...")
+                    emit_log("info", "检测到已开启【自动代付】，正在走 Stripe 协议支付通道（绑卡 mandate -> confirm -> 落库）...")
                     pay_ok = await pay_mgr.auto_pay_stripe(p, checkout_url, settings.card)
+
+                    oc = getattr(pay_mgr, "last_outcome", None)
+                    if oc is not None:
+                        if oc.ok:
+                            emit_log("success",
+                                     f"[协议支付] 完成 stage={oc.stage} 金额={oc.amount} {oc.currency.upper()} "
+                                     f"pi={oc.pi_id or '-'} seti={oc.setup_intent or '-'} "
+                                     f"mandate={oc.mandate_path or '-'}")
+                        else:
+                            emit_log("warning",
+                                     f"[协议支付] 未完成 stage={oc.stage} code={oc.code or '-'} "
+                                     f"reason={oc.reason or '-'} (protocol={oc.protocol})")
+
                     if not pay_ok:
                         emit_log("warning", "Stripe 代付等待超时或未完成。若弹出拼图人机，推荐直接复制上方长链在手机浏览器(用移动数据4G/5G)中打开支付，手机免拼图秒过，后台将自动感知并继续！")
                 else:

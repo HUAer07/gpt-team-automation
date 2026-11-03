@@ -23,3 +23,6 @@ static/error_last_page.png
 .idea/
 .vscode/
 *.zip
+
+# 协议支付 mandate 落库 (含 customer / pm_xxx，等同凭据)
+data/
