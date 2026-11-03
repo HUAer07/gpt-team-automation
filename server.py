@@ -92,6 +92,71 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI(title="ChatGPT Team Automation Dashboard")
 
+# ---------------------------------------------------------------
+# 母号保活：登录态不能掉
+#   - 空闲时每 MASTER_KEEPALIVE_SECONDS（默认 300s）做一次体检
+#   - 复用 Authenticator.login() 的成熟路径：有效则刷新 accessToken/Cookie 并落盘，
+#     失效则自动重新登录（含 Cloudflare / OTP 处理）
+#   - 流水线运行中跳过，避免和任务抢同一个母号页面
+# ---------------------------------------------------------------
+_MASTER_KEEPALIVE_TASK: Optional[asyncio.Task] = None
+
+
+async def master_keepalive_tick() -> str:
+    """保活一拍。返回 ok / skipped_running / no_session / failed"""
+    if state.is_running:
+        return "skipped_running"
+    try:
+        from auth import Authenticator, get_global_playwright, _MASTER_SESSIONS
+        if not _MASTER_SESSIONS:
+            return "no_session"
+        if not settings.master.email or not settings.master.password:
+            return "no_session"
+        p = await get_global_playwright()
+        auth = Authenticator(settings.master, is_master=True)
+        sess = await auth.login(p)
+        return "ok" if sess else "failed"
+    except Exception as e:
+        emit_log("warning", f"[母号保活] 本轮核验异常: {e}")
+        return "failed"
+
+
+async def master_keepalive_loop(interval_seconds: int = 300) -> None:
+    emit_log("info", f"🔒 [母号保活] 已启动，每 {interval_seconds}s 核验一次登录态（运行中自动让路）")
+    while True:
+        try:
+            await asyncio.sleep(max(60, interval_seconds))
+            result = await master_keepalive_tick()
+            if result == "ok":
+                emit_log("info", "🔒 [母号保活] 登录态有效，已刷新 token/cookie 并落盘")
+            elif result == "failed":
+                emit_log("warning", "🔒 [母号保活] 本轮未取得有效会话，下轮继续重试")
+        except asyncio.CancelledError:
+            emit_log("warning", "🔒 [母号保活] 已停止")
+            raise
+        except Exception as e:
+            emit_log("warning", f"🔒 [母号保活] 循环异常: {e}")
+
+
+@app.on_event("startup")
+async def _start_master_keepalive():
+    global _MASTER_KEEPALIVE_TASK
+    if _MASTER_KEEPALIVE_TASK and not _MASTER_KEEPALIVE_TASK.done():
+        return
+    try:
+        interval = int(os.environ.get("MASTER_KEEPALIVE_SECONDS", "300"))
+    except Exception:
+        interval = 300
+    _MASTER_KEEPALIVE_TASK = asyncio.create_task(master_keepalive_loop(interval))
+
+
+@app.on_event("shutdown")
+async def _stop_master_keepalive():
+    global _MASTER_KEEPALIVE_TASK
+    if _MASTER_KEEPALIVE_TASK and not _MASTER_KEEPALIVE_TASK.done():
+        _MASTER_KEEPALIVE_TASK.cancel()
+        _MASTER_KEEPALIVE_TASK = None
+
 app.add_middleware(BasicAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -732,7 +797,7 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
         2: "步骤 2: 发送 Owner 权限邀请给子号",
         3: "步骤 3: 子号独立登录并确认接受邀请",
         4: "步骤 4: 移交 Primary Owner 主所有权给首选子号",
-        5: "步骤 5: 母号安全脱离工作区"
+        5: "步骤 5: 子号踢出母号（母号脱离工作区）"
     }
 
     child_session: Optional[AuthSession] = None
@@ -1031,6 +1096,18 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
 
         state.status = "completed"
         state.step_message = f"批量流水线已圆满完成 (共交付 {completed_batches} 个 Team 工作区)" if total_batches > 1 else "全流程已成功完成"
+
+        # 收尾体检：母号刚被踢出工作区，确认账号级登录态没跟着掉；掉线就地自动重登
+        try:
+            ka = await master_keepalive_tick()
+            if ka == "ok":
+                emit_log("success", "🔒 [收尾体检] 母号登录态仍有效（token/cookie 已刷新落盘），可继续下一批")
+            elif ka == "failed":
+                emit_log("warning", "🔒 [收尾体检] 母号会话本轮未恢复，保活线程会继续重试")
+            else:
+                emit_log("info", f"🔒 [收尾体检] 结果: {ka}")
+        except Exception as e:
+            emit_log("warning", f"🔒 [收尾体检] 异常: {e}")
         state.failed_step = 1  # 成功后重置断点步骤为 1
         await broadcast_event("state_change", {"step": 5, "failed_step": 1, "status": "completed", "msg": state.step_message})
 
