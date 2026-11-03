@@ -86,8 +86,7 @@ class BundleCapture:
                                 if k.lower() not in ("cookie", "content-length")},
                     "body": req.post_data or "",
                 }
-                logger.success("捕获到页面原生 /confirm 请求，%d 字节 body",
-                               len(req.post_data or ""))
+                logger.success(f"捕获到页面原生 /confirm 请求，{len(req.post_data or '')} 字节 body")
             elif "m.stripe.network" in u and not self.data.get("fingerprint"):
                 self.data["fingerprint"] = {"url": u, "body": req.post_data or "",
                                             "headers": dict(req.headers or {})}
@@ -244,7 +243,7 @@ class BundleCapture:
             if await email_loc.count() > 0 and await email_loc.is_visible():
                 if not (await email_loc.input_value()):
                     await email_loc.fill(self.email or "billing@example.com")
-                    logger.info("已填邮箱: %s", (self.email or "billing@example.com"))
+                    logger.info(f"已填邮箱: {self.email or 'billing@example.com'}")
                     await asyncio.sleep(0.3)
 
             loc = page.locator("#cardNumber")
@@ -268,7 +267,7 @@ class BundleCapture:
                 if want_c and cur_c != want_c:
                     try:
                         await c_loc.select_option(want_c)
-                        logger.info("账单国家 %s -> %s", cur_c, want_c)
+                        logger.info(f"账单国家 {cur_c} -> {want_c}")
                         await asyncio.sleep(1.5)
                     except Exception as e:
                         logger.warning(f"切换国家失败: {e}")
