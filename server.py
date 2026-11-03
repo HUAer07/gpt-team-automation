@@ -123,12 +123,14 @@ async def master_keepalive_tick() -> str:
 
 async def master_keepalive_loop(interval_seconds: int = 300) -> None:
     emit_log("info", f"🔒 [母号保活] 已启动，每 {interval_seconds}s 核验一次登录态（运行中自动让路）")
+    logger.info(f"[母号保活] started, interval={interval_seconds}s")
     while True:
         try:
             await asyncio.sleep(max(60, interval_seconds))
             result = await master_keepalive_tick()
             if result == "ok":
                 emit_log("info", "🔒 [母号保活] 登录态有效，已刷新 token/cookie 并落盘")
+                logger.info("[母号保活] tick ok (token/cookie refreshed)")
             elif result == "failed":
                 emit_log("warning", "🔒 [母号保活] 本轮未取得有效会话，下轮继续重试")
         except asyncio.CancelledError:
@@ -148,6 +150,29 @@ async def _start_master_keepalive():
     except Exception:
         interval = 300
     _MASTER_KEEPALIVE_TASK = asyncio.create_task(master_keepalive_loop(interval))
+    asyncio.create_task(_warmup_master_session())
+
+
+async def _warmup_master_session(delay: float = 6.0) -> None:
+    """重启后把母号会话预热回在线：磁盘里有历史凭据就直接恢复，避免"空了才登"。"""
+    await asyncio.sleep(delay)
+    try:
+        from auth import _MASTER_SESSIONS, _MASTER_CACHE_FILE
+        if _MASTER_SESSIONS:
+            return
+        if not _MASTER_CACHE_FILE.exists():
+            logger.info("[母号保活] 无历史凭据缓存，跳过预热（首次任务时正常登录）")
+            return
+        if not settings.master.email or not settings.master.password:
+            return
+        emit_log("info", "🔒 [母号保活] 检测到历史登录凭据，正在预热恢复母号会话...")
+        res = await master_keepalive_tick()
+        if res == "ok":
+            emit_log("success", "🔒 [母号保活] 母号会话已预热恢复在线（无需等待下次任务）")
+        else:
+            emit_log("warning", f"🔒 [母号保活] 预热结果: {res}")
+    except Exception as e:
+        logger.warning(f"[母号保活] 预热异常: {e}")
 
 
 @app.on_event("shutdown")
