@@ -166,6 +166,7 @@ async (args) => {
 class StripeHints:
     """页面 init/confirm 阶段嗅探到的会话参数，协议确认要用它拼 body。"""
     cs_id: str = ""
+    host: str = ""
     guid: str = ""
     amount_due: Optional[int] = None
     currency: str = "usd"
@@ -360,6 +361,7 @@ class StripeProtocolPayer:
                     live, test = got.get("pk_live") or "", got.get("pk_test") or ""
                     # cs_live 必须配 pk_live；只有 test 键时不要拿来打 live 会话
                     self.hints.pk = live or test
+                    self.hints.host = str(got.get("host") or "")
                     logger.info(f"publishable key: live={'有' if live else '无'} test={'有' if test else '无'} "
                                 f"(host={got.get('host')})")
                 elif isinstance(got, str) and got.startswith("pk_"):
@@ -412,7 +414,13 @@ class StripeProtocolPayer:
             return PayOutcome(stage="bind", ok=True, payment_method=body["id"])
         err = (body or {}).get("error") or {}
         code = str(err.get("code") or "http_%s" % status)
-        logger.warning(f"pk 直连绑卡失败 [{code}] {err.get('message') or (res or {}).get('text', '')[:120]}")
+        msg = str(err.get("message") or (res or {}).get("text", "")[:200])
+        if "publishable key tokenization" in msg.lower():
+            set_capability(self.hints.host or "unknown", "pk_tokenization", False)
+            code = "pk_tokenization_disabled"
+            logger.error("Stripe 侧已禁用该商户的 publishable key tokenization："
+                         "这家店只能用页面原生组件 token 化，纯协议绑卡走不通（已记入能力缓存，下次跳过）")
+        logger.warning(f"pk 直连绑卡失败 [{code}] {msg[:160]}")
         self._dump_debug("bind_api_error", form, res)
         return PayOutcome(stage="bind", reason=str(err.get("message") or status),
                           code=code, fallback_ok=code not in CARD_LEVEL_CODES)
@@ -441,6 +449,10 @@ class StripeProtocolPayer:
         }
         logger.info(f"协议阶段 [1/3] 绑卡: {_mask_pan(number)} | {exp_month}/{exp_year} | "
                     f"{billing['address']['country']} {billing['address']['state']}")
+        if capability(self.hints.host, "pk_tokenization") is False:
+            logger.info("已知本站禁用 publishable key tokenization，跳过协议绑卡，直接走页面原生提交")
+            return PayOutcome(stage="bind", reason="本站 pk tokenization 已禁用（能力缓存）",
+                              code="pk_tokenization_disabled", fallback_ok=True)
         try:
             res = await self.page.evaluate(JS_BIND_PM, {
                 "pk": self.hints.pk,
@@ -667,30 +679,19 @@ class StripeProtocolPayer:
 
     # ---------------- 6. mandate 落库 ----------------
     def save_mandate(self, outcome: PayOutcome) -> str:
-        MANDATE_DIR.mkdir(parents=True, exist_ok=True)
-        key = outcome.customer or outcome.cs_id or ("cs_" + str(int(time.time())))
-        path = MANDATE_DIR / ("%s.json" % re.sub(r"[^A-Za-z0-9_\-]", "_", key))
-        payload = {
-            "customer": outcome.customer,
-            "payment_method": outcome.payment_method,
-            "setup_intent": outcome.setup_intent,
-            "checkout_session": outcome.cs_id,
-            "payment_intent": outcome.pi_id,
-            "amount": outcome.amount,
-            "currency": outcome.currency,
-            "card_last4": re.sub(r"\D", "", self.card.card_number or "")[-4:],
-            "card_brand_guess": (self.card.card_number or "")[:1],
-            "billing_country": (self.card.billing_country or "US").upper(),
-            "mode": "protocol_off_session",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        try:
-            os.chmod(str(path), 0o600)
-        except Exception:
-            pass
-        logger.info(f"📇 mandate 已落库: {path}")
-        return str(path)
+        """协议链路落库（与 UI 原生链路共用同一种记录结构）"""
+        return save_mandate_record(
+            customer=outcome.customer,
+            payment_method=outcome.payment_method,
+            checkout_session=outcome.cs_id,
+            payment_intent=outcome.pi_id,
+            setup_intent=outcome.setup_intent,
+            amount=outcome.amount,
+            currency=outcome.currency,
+            card_last4=self.card.card_number or "",
+            billing_country=self.card.billing_country or "US",
+            source="protocol_confirm",
+        )
 
     # ---------------- 7. 总调度 ----------------
     async def pay(self) -> PayOutcome:
@@ -722,6 +723,64 @@ class StripeProtocolPayer:
                            f"{outcome.currency.upper()} | pi={outcome.pi_id or '-'} | "
                            f"customer={outcome.customer or '-'}")
         return outcome
+
+
+CAP_DIR = MANDATE_DIR.parent
+
+
+def save_mandate_record(customer: str = "", payment_method: str = "", checkout_session: str = "",
+                        payment_intent: str = "", setup_intent: str = "", amount: int = 0,
+                        currency: str = "usd", card_last4: str = "",
+                        billing_country: str = "US", source: str = "protocol") -> str:
+    """落一条 mandate。协议通道与 UI 原生提交通道共用同一种记录结构。"""
+    MANDATE_DIR.mkdir(parents=True, exist_ok=True)
+    key = customer or checkout_session or ("cs_" + str(int(time.time())))
+    path = MANDATE_DIR / ("%s.json" % re.sub(r"[^A-Za-z0-9_\-]", "_", key))
+    payload = {
+        "customer": customer,
+        "payment_method": payment_method,
+        "setup_intent": setup_intent,
+        "checkout_session": checkout_session,
+        "payment_intent": payment_intent,
+        "amount": amount,
+        "currency": (currency or "usd").lower(),
+        "card_last4": re.sub(r"\D", "", card_last4 or "")[-4:],
+        "billing_country": (billing_country or "US").upper(),
+        "mode": "off_session_mandate",
+        "source": source,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(str(path), 0o600)
+    except Exception:
+        pass
+    logger.info(f"\U0001F4C7 mandate \u5df2\u843d\u5e93 [{source}]: {path}")
+    return str(path)
+
+
+def _cap_path():
+    return CAP_DIR / "protocol_capabilities.json"
+
+
+def capability(host: str, key: str, default=None):
+    try:
+        data = json.loads(_cap_path().read_text(encoding="utf-8"))
+        return (data.get(host) or {}).get(key, default)
+    except Exception:
+        return default
+
+
+def set_capability(host: str, key: str, value) -> None:
+    try:
+        CAP_DIR.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _cap_path().exists():
+            data = json.loads(_cap_path().read_text(encoding="utf-8"))
+        data.setdefault(host, {})[key] = value
+        _cap_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"能力标记写入失败: {e}")
 
 
 # --------------------------------------------------------------------------

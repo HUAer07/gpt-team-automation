@@ -142,7 +142,8 @@ async def scenario_ok():
     assert mpath.exists(), mpath
     saved = json.loads(mpath.read_text(encoding="utf-8"))
     assert saved["payment_method"] == "pm_1TestPmAbc"
-    assert saved["mode"] == "protocol_off_session"
+    assert saved["mode"] == "off_session_mandate", saved
+    assert saved["source"] == "protocol_confirm", saved
     assert saved["amount"] == 6000
     print("[ok] 正常扣款链路: stage=%s amount=%s %s pi=%s seti=%s mandate=%s" % (
         out.stage, out.amount, out.currency, out.pi_id, out.setup_intent, mpath.name))

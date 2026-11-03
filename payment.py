@@ -692,6 +692,23 @@ class PaymentManager:
                                 f"🎉 协议步骤 [4/4] Stripe 扣款成功！"
                                 f"(status={c_status}, payment_status={p_status}, pi_status={pi_status})"
                             )
+                            # 页面原生提交成功也落 mandate：后续补扣 / 换卡重试要用 customer + pm
+                            try:
+                                from payment_protocol import save_mandate_record
+                                _pi = pi if isinstance(pi, dict) else {}
+                                save_mandate_record(
+                                    customer=str(_pi.get("customer") or c_json.get("customer") or ""),
+                                    payment_method=str(_pi.get("payment_method") or c_json.get("payment_method") or ""),
+                                    checkout_session=cs_id,
+                                    payment_intent=str(_pi.get("id") or ""),
+                                    amount=int((c_json.get("total_summary") or {}).get("due") or 0),
+                                    currency=str(c_json.get("currency") or "usd"),
+                                    card_last4=card.card_number or "",
+                                    billing_country=card.billing_country or "US",
+                                    source="ui_native_confirm",
+                                )
+                            except Exception as m_err:
+                                logger.debug(f"mandate 落库跳过: {m_err}")
                             if not confirm_future.done():
                                 confirm_future.set_result({"ok": True, "success_url": s_url})
                         elif pi_status == "requires_action":
