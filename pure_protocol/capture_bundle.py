@@ -256,13 +256,45 @@ class BundleCapture:
                 el = page.locator(sel)
                 if val and await el.count() > 0 and await el.is_visible():
                     await el.fill(val)
+
+            # 州/省：select 必须走 JS 选值（payment.py 里同一套逻辑）
+            st_loc = page.locator("#billingAdministrativeArea")
+            if await st_loc.count() > 0 and not await st_loc.is_disabled():
+                tag = (await st_loc.evaluate("el => el.tagName.toLowerCase()")) or ""
+                want = (card.billing_state or "DE").strip()
+                if tag == "select":
+                    res = await st_loc.evaluate("""(el, target) => {
+                        const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+                        const t = norm(target);
+                        const opt = Array.from(el.options).find(o => norm(o.value) === t || norm(o.text) === t)
+                                 || Array.from(el.options).find(o => norm(o.text).startsWith(t))
+                                 || Array.from(el.options).find(o => o.value && o.value !== '');
+                        if (!opt) return {ok: false};
+                        el.value = opt.value;
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        return {ok: true, text: opt.text, value: opt.value};
+                    }""", want)
+                    logger.info(f"州/省 -> {res}")
+                else:
+                    await st_loc.fill(want)
             tos = page.locator("#termsOfServiceConsentCheckbox")
             if await tos.count() > 0 and not await tos.is_checked():
                 await tos.check(force=True)
             await asyncio.sleep(4.0)
+            try:
+                await page.screenshot(path="/app/data/capture_before_submit.png", full_page=True)
+            except Exception:
+                pass
             btn = page.locator('button[type="submit"], .SubmitButton').first
             logger.info("提交表单，等页面自己发 /confirm ...")
             await btn.click()
+            await asyncio.sleep(12.0)
+            try:
+                await page.screenshot(path="/app/data/capture_after_submit.png", full_page=True)
+                logger.info("已截图 /app/data/capture_after_submit.png")
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"自动填表失败（可手动在窗口里填）: {e}")
 
