@@ -107,14 +107,13 @@ class BundleCapture:
                     self.data["currency"] = (d.get("currency") or "usd").lower()
                     if isinstance(d.get("customer"), str):
                         self.data["customer"] = d["customer"]
-                    logger.info("init: guid=%s due=%s %s checksum=%s",
-                                bool(self.data["guid"]), self.data["amount"],
-                                self.data["currency"].upper(), bool(self.data["init_checksum"]))
+                    logger.info(f"init: guid={bool(self.data['guid'])} due={self.data['amount']} "
+                                f"{self.data['currency'].upper()} checksum={bool(self.data['init_checksum'])}")
             elif "/payment_methods" in u and resp.status == 200:
                 d = await resp.json()
                 if isinstance(d, dict) and d.get("id"):
                     self.data["payment_method"] = d["id"]
-                    logger.success("页面生成 PaymentMethod: %s", d["id"])
+                    logger.success(f"页面生成 PaymentMethod: {d['id']}")
         except Exception as e:
             logger.debug(f"抓响应失败: {e}")
 
@@ -142,7 +141,7 @@ class BundleCapture:
             page.on("request", self.on_request)
             page.on("response", self.on_response)
 
-            logger.info("打开 checkout: %s", self.url)
+            logger.info(f"打开 checkout: {self.url}")
             await page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(5.0)
 
@@ -153,10 +152,10 @@ class BundleCapture:
                     live, test = pks.get("pk_live") or "", pks.get("pk_test") or ""
                     is_live = self.data["cs"].startswith("cs_live")
                     self.data["pk"] = (live or test) if is_live else (test or live)
-                    logger.info("publishable key: live=%s test=%s -> 用 %s",
-                                bool(live), bool(test), self.data["pk"][:14] + "…" if self.data["pk"] else "无")
+                    logger.info(f"publishable key: live={bool(live)} test={bool(test)} -> "
+                                f"用 {(self.data['pk'][:14] + '…') if self.data['pk'] else '无'}")
             except Exception as e:
-                logger.warning("读 pk 失败: %s", e)
+                logger.warning(f"读 pk 失败: {e}")
 
             if self.autofill and card.card_number:
                 await self._fill_and_submit(page, card)
@@ -176,7 +175,7 @@ class BundleCapture:
                     for c in cookies if "stripe" in (c.get("domain") or "") or "openai" in (c.get("domain") or "")
                 ]
             except Exception as e:
-                logger.warning("读 cookies 失败: %s", e)
+                logger.warning(f"读 cookies 失败: {e}")
 
             await ctx.close()
 
@@ -188,9 +187,8 @@ class BundleCapture:
             pass
 
         has_confirm = bool((self.data.get("confirm") or {}).get("body"))
-        logger.success("bundle 已写: %s（confirm=%s, pm=%s, cookies=%d）",
-                       self.out, "有" if has_confirm else "无",
-                       self.data.get("payment_method") or "-", len(self.data["cookies"]))
+        logger.success(f"bundle 已写: {self.out}（confirm={'有' if has_confirm else '无'}, "
+                       f"pm={self.data.get('payment_method') or '-'}, cookies={len(self.data['cookies'])}）")
         if not has_confirm:
             logger.warning("没抓到 /confirm：bundle 只能跑 status；"
                            "要跑 confirm 必须在页面上真实提交一次（或被 hCaptcha 挡住）")
@@ -226,7 +224,7 @@ class BundleCapture:
             logger.info("提交表单，等页面自己发 /confirm ...")
             await btn.click()
         except Exception as e:
-            logger.warning("自动填表失败（可手动在窗口里填）: %s", e)
+            logger.warning(f"自动填表失败（可手动在窗口里填）: {e}")
 
 
 def main(argv=None) -> int:

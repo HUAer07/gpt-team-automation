@@ -267,10 +267,10 @@ class PureStripeClient:
             path.write_text(json.dumps(rec, ensure_ascii=False, indent=2)[:20000], encoding="utf-8")
         except Exception:
             path = None
-        logger.info("[%s] HTTP %s%s", kind, r.status_code,
-                    "" if body is None else " | " + json.dumps(body, ensure_ascii=False)[:220])
+        logger.info(f"[{kind}] HTTP {r.status_code}"
+                    + ("" if body is None else " | " + json.dumps(body, ensure_ascii=False)[:220]))
         if path:
-            logger.debug("落盘: %s", path)
+            logger.debug(f"落盘: {path}")
         return rec
 
 
@@ -307,10 +307,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     b = Bundle.load(a.bundle)
     missing = b.required_missing()
     if missing:
-        logger.warning("bundle 缺字段: %s（confirm 会失败，status 仍可用）", missing)
-    logger.info("bundle: %s | cs=%s | pk=%s | pm=%s | 金额=%s %s",
-                b.path, b.cs or "-", (b.pk[:14] + "…") if b.pk else "-",
-                b.payment_method or "-", b.amount, b.currency.upper())
+        logger.warning(f"bundle 缺字段: {missing}（confirm 会失败，status 仍可用）")
+    logger.info(f"bundle: {b.path} | cs={b.cs or '-'} | pk={(b.pk[:14] + '…') if b.pk else '-'} "
+                f"| pm={b.payment_method or '-'} | 金额={b.amount} {b.currency.upper()}")
 
     cli = PureStripeClient(b, proxy=a.proxy or None, timeout=a.timeout)
     try:
