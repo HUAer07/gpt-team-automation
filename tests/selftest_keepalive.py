@@ -76,11 +76,10 @@ async def main():
         auth._MASTER_SESSIONS["master@example.com"] = types.SimpleNamespace(email="master@example.com")
         server.settings.master.email = server.settings.master.email or "master@example.com"
         server.settings.master.password = server.settings.master.password or "pw"
-        fake = FakeAuth
-        server.FakeAuth = fake  # noqa  (仅供断言计数可见)
+        before2 = FakeAuth.calls
         r = await server.master_keepalive_tick()
         assert r == "ok", r
-        assert FakeAuth.calls == 1, FakeAuth.calls
+        assert FakeAuth.calls == before2 + 1, FakeAuth.calls
         print("[ok] 有会话 -> %s（login() 被调用 1 次，即体检+刷新+落盘路径）" % r)
     finally:
         restore()
