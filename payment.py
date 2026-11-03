@@ -1022,7 +1022,11 @@ class PaymentManager:
                 elif hcaptcha_clicks >= 4 and not hcaptcha_gave_up and not hcap_token:
                     hcaptcha_gave_up = True
                     logger.warning("hCaptcha 连点 4 次仍无 token：出口 IP / 浏览器指纹被判定为自动化。"
-                                   "建议改用手机长链秒付，或给 YesCaptcha 补 hCaptcha 额度后重试")
+                                   "不再空等剩余时间，直接判定本单需要人工过验证")
+                    if not confirm_future.done():
+                        confirm_future.set_result(
+                            {"ok": False, "reason": "hcaptcha_blocked", "hint": "需人工过 hCaptcha/3DS"})
+                    break
 
                 await asyncio.sleep(1.0)
 
