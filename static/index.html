@@ -477,6 +477,16 @@
               <i class="fa-solid fa-magnifying-glass-chart"></i>
               <span>子号空间体检</span>
             </button>
+            <!-- 子号体检数字面板（直观可见，不用点开弹窗） -->
+            <div id="audit-stats" class="flex items-center gap-2.5 bg-dark-950 border border-sky-500/30 rounded-xl px-3 py-1.5 text-[11px] whitespace-nowrap">
+              <span class="text-slate-500 flex items-center gap-1"><i class="fa-solid fa-users-rectangle text-sky-400"></i>子号体检</span>
+              <span class="text-slate-300">总 <b id="audit-total" class="text-slate-100">-</b></span>
+              <span class="text-emerald-400">正常 <b id="audit-ok">-</b></span>
+              <span class="text-amber-400">无空间 <b id="audit-nospace">-</b></span>
+              <span class="text-rose-400">多空间 <b id="audit-multi">-</b></span>
+              <span class="text-slate-400">失败 <b id="audit-failed">-</b></span>
+              <span id="audit-time" class="text-slate-600"></span>
+            </div>
             <!-- 启动全流程 -->
             <button id="btn-start" onclick="startPipeline()" class="flex-1 sm:flex-none px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/25 flex items-center justify-center space-x-1.5 transition">
               <i class="fa-solid fa-play"></i>
@@ -1179,6 +1189,39 @@
       }
     }
 
+    // 子号体检数字面板：总/正常/无空间/多空间/失败
+    function renderAuditStats(d) {
+      if (!d) return;
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v === undefined || v === null) ? '-' : v; };
+      set('audit-total', d.total ?? (d.reports ? d.reports.length : '-'));
+      set('audit-ok', (d.ok || []).length);
+      set('audit-nospace', (d.no_space || []).length);
+      set('audit-multi', (d.multi_space || []).length);
+      set('audit-failed', (d.failed || []).length);
+      const box = document.getElementById('audit-stats');
+      if (box) {
+        // 有异常就把整块染红/黄，扫一眼就知道
+        box.classList.remove('border-sky-500/30', 'border-amber-500/50', 'border-rose-500/50');
+        if ((d.multi_space || []).length) box.classList.add('border-rose-500/50');
+        else if ((d.no_space || []).length || (d.failed || []).length) box.classList.add('border-amber-500/50');
+        else box.classList.add('border-sky-500/30');
+      }
+      const t = document.getElementById('audit-time');
+      if (t) {
+        const now = new Date();
+        t.textContent = now.toTimeString().slice(0, 5);
+      }
+    }
+
+    // 页面打开时拉上次结果，直接显示数字
+    async function loadAuditStats() {
+      try {
+        const res = await fetch('/api/children/audit/last');
+        const ret = await res.json();
+        if (ret && ret.result) renderAuditStats(ret.result);
+      } catch (e) { /* 忽略：还没跑过体检 */ }
+    }
+
     // 子号空间体检：每个子号挂了几个空间 / 谁没有空间
     async function auditChildrenSpaces() {
       appendLog('info', '🧪 开始子号空间体检（逐个登录核对空间归属）...');
@@ -1193,6 +1236,7 @@
           alert(ret.detail || ret.message || '体检失败');
           return;
         }
+        renderAuditStats(ret);
         const rows = (ret.reports || []).map(r => {
           const ws = (r.workspaces || []).map(w => `${w.name || '?'}(${w.plan_type || '?'})`).join(', ') || '-';
           const color = r.status === 'ok' ? 'text-emerald-400'
@@ -1470,6 +1514,8 @@
           updateUIState(msg.data);
         } else if (msg.type === 'checkout_link') {
           showCheckoutLink(msg.data.url);
+        } else if (msg.type === 'children_audit') {
+          renderAuditStats(msg.data);
         } else if (msg.type === 'config_updated') {
           if (msg.data.children_raw !== undefined) {
             const rawEl = document.getElementById('children_raw');
@@ -1622,6 +1668,12 @@
       const y = Math.round(((clientY - rect.top) / rect.height) * natH);
       return { x, y };
     }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      // 子号体检数字面板：进页面就显示上次结果，并每分钟刷新
+      loadAuditStats();
+      setInterval(loadAuditStats, 60000);
+    });
 
     window.addEventListener('DOMContentLoaded', () => {
       const img = document.getElementById('live-screen-img');

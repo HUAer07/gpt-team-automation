@@ -156,6 +156,14 @@ async def _start_master_keepalive():
         interval = 300
     _MASTER_KEEPALIVE_TASK = asyncio.create_task(master_keepalive_loop(interval))
     asyncio.create_task(_warmup_master_session())
+    # 上次的体检数字：进控制台就能看见，不用先跑一次
+    try:
+        audit_file = Path(__file__).parent / "data" / "children_audit_last.json"
+        if audit_file.exists():
+            state.last_child_audit = json.loads(audit_file.read_text(encoding="utf-8"))
+            logger.info(f"[子号体检] 已载入上次结果: total={state.last_child_audit.get('total')}")
+    except Exception as e:
+        logger.debug(f"载入上次体检结果失败: {e}")
 
 
 async def _warmup_master_session(delay: float = 6.0) -> None:
@@ -801,6 +809,12 @@ async def audit_children_endpoint(payload: Optional[dict] = None):
              f"失败 {len(summary['failed'])}")
 
     state.last_child_audit = summary
+    try:
+        audit_file = Path(__file__).parent / "data" / "children_audit_last.json"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"体检结果落盘失败: {e}")
     await broadcast_event("children_audit", summary)
     return {"status": "success", **summary}
 
