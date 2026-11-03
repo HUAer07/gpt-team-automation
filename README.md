@@ -163,3 +163,65 @@ ls ~/gpt-team-automation/data/protocol_debug/
    本项目里续费由 Stripe 订阅自动执行，`charge` 类操作只做首单重试（同一 `cs` 的 confirm）。
 3. 3DS 无法用协议绕过：银行挑战页必须真实渲染完成，`handle_3ds` 只负责等与判定。
 4. `client_secret` 一次性，同一 `pi` 重放会 `already_succeeded`；重试要重新建单。
+
+---
+
+## 纯血协议（无浏览器，httpx 直打 Stripe）
+
+`pure_protocol/` 是真正不启浏览器的实现：`httpx` 组请求、带 cookie、打 `api.stripe.com`。
+
+```
+pure_protocol/
+├── stripe_pure.py       # 纯 HTTP 客户端 + CLI（status / confirm / create-pm / seti）
+└── capture_bundle.py    # 一次性取料：把页面会话里只有 JS 能生成的东西抓成 bundle.json
+tests/selftest_pure.py   # MockTransport 自检（字节级重放 / 定向替换 / 400 解析）
+```
+
+### 一个物理前提
+
+Stripe 的 confirm 要 `passive_captcha_token`、`rv_timestamp`、`init_checksum` 这类**页面 JS 生成**的字段，
+纯 HTTP 无法从无到有造出来。所以纯血协议的正确形态是：
+
+```
+一次取料（浏览器，脚本自动）  →  bundle.json
+之后全部纯协议（无浏览器）    →  可重放 N 次、可换 pm / 改金额做补扣
+```
+
+### 用法
+
+```bash
+# 1) 取料（一次，会开窗口；--autofill 用 .env 的卡自动填表触发页面提交）
+./venv/bin/python -m pure_protocol.capture_bundle \
+    --url "https://pay.openai.com/c/pay/cs_live_..." --out data/bundle.json --autofill --wait 180
+
+# 2) 之后纯 HTTP，无浏览器
+./venv/bin/python -m pure_protocol.stripe_pure --bundle data/bundle.json status
+./venv/bin/python -m pure_protocol.stripe_pure --bundle data/bundle.json confirm --dry-run
+./venv/bin/python -m pure_protocol.stripe_pure --bundle data/bundle.json confirm --raw          # 字节级重放
+./venv/bin/python -m pure_protocol.stripe_pure --bundle data/bundle.json confirm --pm pm_新卡    # 换卡补扣
+./venv/bin/python -m pure_protocol.stripe_pure --bundle data/bundle.json create-pm \
+    --number 4242... --exp 12/30 --cvc 123                                                       # 纯 HTTP 绑卡
+```
+
+### 自检（已通过）
+
+```
+[ok] 定向替换: pm 换掉、token 保留、cookie 随行（body 199 字节）
+[ok] 字节级重放: 发出 body 与捕获完全一致
+[ok] 最小字段模式 / 400 解析 / status 查询 / CLI dry-run / 半份 bundle 检测
+ALL PURE-PROTOCOL SELFTESTS PASSED
+```
+
+真实连通性也验过：用假 pk 打 `api.stripe.com` → `HTTP 401 invalid_request_error: Invalid API Key`，
+说明客户端确实在走真实 Stripe API，不是本地假跑。
+
+### 哪些是纯协议、哪些必须取料
+
+| 动作 | 纯 HTTP 可行 | 说明 |
+| --- | --- | --- |
+| `GET /payment_pages/{cs}` 查状态 | ✅ | 只要 pk + cs |
+| `POST /payment_pages/{cs}/confirm` | ⚠️ 需 bundle | 缺页面 token 会被 400 `parameter_missing` |
+| 重放已成功的 confirm | ✅ | `--raw` 字节级 |
+| 换 pm 补扣 | ✅ | `--pm`，token 复用 |
+| `POST /payment_methods` 绑新卡 | ❌ 本店禁用 | 400 `unsupported for publishable key tokenization` |
+| `POST /setup_intents` | ❌ 同 | 同上（pk 权限不足） |
