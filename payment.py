@@ -108,7 +108,7 @@ class PaymentManager:
             candidates_promo = [""]
 
         eval_js = """
-                    async ({ workspaceName, promoCode, fallbackCountry, overrideCountry }) => {
+                    async ({ workspaceName, promoCode, fallbackCountry, overrideCountry, billingAddress }) => {
                         const currencyMap = {
                             'AE': 'AED', 'AL': 'ALL', 'AM': 'AMD', 'AU': 'AUD', 'AW': 'AWG', 'AZ': 'AZN',
                             'BA': 'BAM', 'BD': 'BDT', 'BG': 'BGN', 'BH': 'BHD', 'BM': 'BMD', 'BR': 'BRL',
@@ -191,7 +191,7 @@ class PaymentManager:
                                     price_interval: "month",
                                     seat_quantity: 3
                                 },
-                                billing_details: { country, currency },
+                                billing_details: { country, currency, address: billingAddress },
                                 cancel_url: `https://chatgpt.com/?promoCode=${encodeURIComponent(promoCode)}`,
                                 promo_code: promoCode,
                                 checkout_ui_mode: "hosted"
@@ -204,7 +204,7 @@ class PaymentManager:
                                         price_interval: "month",
                                         seat_quantity: 3
                                     },
-                                    billing_details: { country: "US", currency: "USD" },
+                                    billing_details: { country: "US", currency: "USD", address: billingAddress },
                                     cancel_url: `https://chatgpt.com/p/${encodeURIComponent(promoCode)}`,
                                     promo_code: promoCode,
                                     checkout_ui_mode: "hosted"
@@ -218,7 +218,7 @@ class PaymentManager:
                                 price_interval: "month",
                                 seat_quantity: 3
                             },
-                            billing_details: { country, currency },
+                            billing_details: { country, currency, address: billingAddress },
                             cancel_url: "https://chatgpt.com/#pricing",
                             checkout_ui_mode: "hosted"
                         });
@@ -266,6 +266,14 @@ class PaymentManager:
                 "promoCode": current_promo,
                 "fallbackCountry": settings.card.billing_country or "US",
                 "overrideCountry": override_country,
+                # 会话创建后再也改不了账单地址，必须在这步塞进去
+                "billingAddress": {
+                    "line1": settings.card.billing_line1 or "",
+                    "city": settings.card.billing_city or "",
+                    "state": settings.card.billing_state or "",
+                    "postal_code": settings.card.billing_zip or "",
+                    "country": (settings.card.billing_country or "US").upper(),
+                },
             }
 
             promo_label = f"优惠码 [{current_promo}]" if current_promo else "标准无优惠码"
