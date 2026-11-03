@@ -58,12 +58,19 @@ async def main():
         assert FakeAuth.calls == 0, FakeAuth.calls
         print("[ok] 流水线运行中 -> %s（不抢母号页面，login 未被调用）" % r)
 
-        # 2) 无会话
+        # 2) 无会话且不许预热 -> no_session
         server.state.is_running = False
         auth._MASTER_SESSIONS.clear()
         r = await server.master_keepalive_tick()
         assert r == "no_session", r
-        print("[ok] 无在线会话 -> %s" % r)
+        print("[ok] 无在线会话（不许预热）-> %s" % r)
+
+        # 2b) 无会话但允许预热 -> 走 login() 从磁盘恢复
+        before = FakeAuth.calls
+        r = await server.master_keepalive_tick(allow_warmup=True)
+        assert r == "ok", r
+        assert FakeAuth.calls == before + 1, FakeAuth.calls
+        print("[ok] 允许预热 -> %s（走 login() 从磁盘凭据恢复）" % r)
 
         # 3) 有会话，正常体检
         auth._MASTER_SESSIONS["master@example.com"] = types.SimpleNamespace(email="master@example.com")

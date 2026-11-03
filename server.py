@@ -102,13 +102,18 @@ app = FastAPI(title="ChatGPT Team Automation Dashboard")
 _MASTER_KEEPALIVE_TASK: Optional[asyncio.Task] = None
 
 
-async def master_keepalive_tick() -> str:
-    """保活一拍。返回 ok / skipped_running / no_session / failed"""
+async def master_keepalive_tick(allow_warmup: bool = False) -> str:
+    """保活一拍。返回 ok / skipped_running / no_session / failed
+
+    allow_warmup=True 时，即使内存里没有会话也会走一次 login()：
+    该路径会从 browser_profiles/master_sessions.json 恢复 cookie 并复用持久化 profile，
+    从而把母号从"冷"拉回"在线"。
+    """
     if state.is_running:
         return "skipped_running"
     try:
         from auth import Authenticator, get_global_playwright, _MASTER_SESSIONS
-        if not _MASTER_SESSIONS:
+        if not _MASTER_SESSIONS and not allow_warmup:
             return "no_session"
         if not settings.master.email or not settings.master.password:
             return "no_session"
@@ -166,7 +171,7 @@ async def _warmup_master_session(delay: float = 6.0) -> None:
         if not settings.master.email or not settings.master.password:
             return
         emit_log("info", "🔒 [母号保活] 检测到历史登录凭据，正在预热恢复母号会话...")
-        res = await master_keepalive_tick()
+        res = await master_keepalive_tick(allow_warmup=True)
         if res == "ok":
             emit_log("success", "🔒 [母号保活] 母号会话已预热恢复在线（无需等待下次任务）")
         else:
