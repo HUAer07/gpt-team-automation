@@ -129,6 +129,32 @@ curl -s http://127.0.0.1:8899/api/payment/mandates | python3 -m json.tool
 
 覆盖四条链路：正常扣款、拒卡不回落、页面无 Stripe.js 回落、无 checkout session。
 
+### 验证到哪一步了（别把 mock 当实盘）
+
+| 层 | 状态 | 依据 |
+| --- | --- | --- |
+| 代码完整性 / 分支逻辑 | ✅ 已验证 | 6 条 FakePage 自检：正常、拒卡不回落、无 Stripe.js 回落、无 session、参数缺失回落、页面 token 复用 |
+| 部署链路 | ✅ 已验证 | 服务器拉取 15e6336 后重启，`/api/payment/mandates` 200，容器内 selftest 通过 |
+| 真实 Stripe `createPaymentMethod` | ⚠️ 未验证 | 依赖 checkout 页存在 `window.Stripe`；不存在则自动回落，不会死 |
+| 真实 `payment_pages/{cs}/confirm` 字段 | ⚠️ 未验证 | hosted checkout 的 confirm 要页面 JS 生成的 `passive_captcha_token` / `rv_timestamp` / `init_checksum` / `consent[...]`；纯净版大概率被 400 `parameter_missing` 拒 → 已按结构性错误回落 UI |
+| 3DS 自动完成 | ⚠️ 未验证 | 只能真实渲染银行页面，代码只负责等待与读终态 |
+
+**结论**：协议通道的「绑卡 + mandate 落库 + 首单重试」是真能用的；
+**纯净版 confirm 在真实页面上不保证一次过**，所以默认保留了 UI 原生提交兜底 ——
+也就是说实盘上它更可能是「协议绑卡 + 页面原生提交 + mandate 落库」，而不是「全程协议纯打」。
+
+第一次真实跑之前，把报文抓下来再决定要不要补齐字段：
+
+```bash
+# 服务器上
+PAYMENT_PROTOCOL_DEBUG=1   # 写进 .env，任何 confirm 请求/响应都落盘
+ls ~/gpt-team-automation/data/protocol_debug/
+```
+
+`confirm_error_*.json` 里 `form_keys` 与 `response.error.message` 会直接告诉你缺哪个字段；
+`page_confirm_form_*.json` 是页面原生提交时的完整字段表 —— 两份一对比就知道该补什么。
+拿到页面 token 之后，同一 cs 可以用 `StripeProtocolPayer.replay_confirm(pm=...)` 补扣。
+
 ### 已知边界
 
 1. `setup_intents` 用 publishable key 建单，Stripe 多数账号会拒（`seti_unavailable`），

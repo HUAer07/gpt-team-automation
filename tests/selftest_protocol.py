@@ -32,14 +32,22 @@ class FakeResponse:
         return self._payload
 
 
+class FakeRequest:
+    def __init__(self, url, post_data="", method="POST"):
+        self.url = url
+        self.post_data = post_data
+        self.method = method
+
+
 class FakePage:
     """按 JS 片段里的特征分派，模拟页面内 Stripe.js 与 fetch 的返回。"""
 
-    def __init__(self, decline=False, no_stripe_js=False):
+    def __init__(self, decline=False, no_stripe_js=False, param_error=False):
         self.url = "https://checkout.stripe.com/c/pay/cs_live_TEST123"
         self.handlers = {}
         self.decline = decline
         self.no_stripe_js = no_stripe_js
+        self.param_error = param_error
         self.forms = []
         self.gotos = []
 
@@ -53,6 +61,10 @@ class FakePage:
     async def fire_response(self, url, payload, status=200):
         for cb in self.handlers.get("response", []):
             await cb(FakeResponse(url, payload, status))
+
+    async def fire_request(self, url, post_data="", method="POST"):
+        for cb in self.handlers.get("request", []):
+            await cb(FakeRequest(url, post_data, method))
 
     async def evaluate(self, js, arg=None):
         arg = arg or {}
@@ -72,6 +84,10 @@ class FakePage:
             return {"status": 200, "json": {"id": "seti_1TestSeti", "status": "requires_payment_method"}}
         if "/payment_pages/" in url and "confirm" in url:
             self.forms.append(("confirm", arg.get("form")))
+            if self.param_error:
+                missing = "init_checksum" if "init_checksum" not in arg.get("form", {}) else "passive_captcha_token"
+                return {"status": 400, "json": {"error": {"code": "parameter_missing",
+                                                          "message": "Missing required param: %s" % missing}}}
             if self.decline:
                 return {"status": 402, "json": {"error": {"code": "card_declined",
                                                           "decline_code": "generic_decline",
@@ -166,12 +182,55 @@ async def scenario_no_session():
     print("[ok] 无 checkout session 提示: stage=%s fallback_ok=%s" % (out.stage, out.fallback_ok))
 
 
+async def scenario_param_missing():
+    """纯净版 confirm 被参数校验拒（真实 hosted checkout 的常见结果）→ 必须回落 UI。"""
+    page = FakePage(param_error=True)
+    payer = pp.StripeProtocolPayer(page, card())
+    await payer.attach()
+    await page.fire_response(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/init",
+        {"guid": "g1", "currency": "usd", "total_summary": {"due": 6000}},
+    )
+    out = await payer.pay()
+    assert not out.ok
+    assert out.code == "parameter_missing", out.code
+    assert out.fallback_ok is True, out.brief()
+    print("[ok] 纯净版缺 token 被 400: code=%s fallback_ok=%s -> 回落 UI" % (out.code, out.fallback_ok))
+
+
+async def scenario_reuse_page_tokens():
+    """页面原生提交过一次后，重试必须复用它的 token，并用自己的 pm 覆盖。"""
+    page = FakePage()
+    payer = pp.StripeProtocolPayer(page, card())
+    await payer.attach()
+    await page.fire_response(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/init",
+        {"guid": "g1", "currency": "usd", "total_summary": {"due": 6000}},
+    )
+    await page.fire_request(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/confirm",
+        "payment_method=pm_page_native&expected_amount=6000&guid=g1"
+        "&passive_captcha_token=P1_eyJ0eXAiOiJKV1QifQ&rv_timestamp=1762150000"
+        "&init_checksum=abc123&consent%5Bterms_of_service%5D=accepted",
+    )
+    assert "passive_captcha_token" in payer.hints.page_confirm_form
+    out = await payer.pay()
+    assert out.ok, out.brief()
+    sent = dict(page.forms)["confirm"]
+    assert sent["passive_captcha_token"] == "P1_eyJ0eXAiOiJKV1QifQ", sent.keys()
+    assert sent["init_checksum"] == "abc123", sent.keys()
+    assert sent["payment_method"] == "pm_1TestPmAbc", sent  # 本方的 pm 覆盖页面的
+    print("[ok] 复用页面 token 重试: 字段=%d 个, pm 已覆盖" % len(sent))
+
+
 async def main():
     print("mandate dir:", os.environ["PAYMENT_MANDATE_DIR"])
     await scenario_ok()
     await scenario_declined()
     await scenario_no_stripe_js()
     await scenario_no_session()
+    await scenario_param_missing()
+    await scenario_reuse_page_tokens()
     rows = pp.list_mandates()
     assert len(rows) == 1, rows
     print("[ok] list_mandates() ->", len(rows), "条; customer=", rows[0]["customer"])

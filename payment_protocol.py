@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import unquote_plus
 
 from loguru import logger
 
@@ -45,6 +46,14 @@ MANDATE_DIR = Path(os.environ.get("PAYMENT_MANDATE_DIR")
 PROTOCOL_ON = os.environ.get("PAYMENT_PROTOCOL", "1") != "0"
 SETUP_INTENT_ON = os.environ.get("PAYMENT_PROTOCOL_SETUP_INTENT", "1") != "0"
 UI_FALLBACK_ON = os.environ.get("PAYMENT_PROTOCOL_UI_FALLBACK", "1") != "0"
+
+# 卡级拒绝：同一张卡的问题，回落 UI 只会白跑一次
+CARD_LEVEL_CODES = {
+    "card_declined", "incorrect_number", "expired_card", "incorrect_cvc",
+    "incorrect_zip", "processing_error", "authentication_required",
+    "card_not_supported", "currency_not_supported",
+}
+DEBUG_ON = os.environ.get("PAYMENT_PROTOCOL_DEBUG", "0") == "1"
 
 ZERO_DECIMAL = {
     "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA",
@@ -159,6 +168,9 @@ class StripeHints:
     pk: str = ""
     client_secret: str = ""
     last_init_keys: List[str] = field(default_factory=list)
+    # 页面自己提交 /confirm 时抓下来的原始表单（含 passive_captcha_token / rv_timestamp /
+    # init_checksum 等只有页面 JS 才生成得出的字段），协议重试时按需复用
+    page_confirm_form: Dict[str, str] = field(default_factory=dict)
 
     def ready(self) -> bool:
         return bool(self.cs_id) and (self.amount_due is not None or bool(self.guid))
@@ -219,9 +231,53 @@ class StripeProtocolPayer:
     # ---------------- 1. 挂嗅探 ----------------
     async def attach(self) -> None:
         self.page.on("response", self._on_response)
+        self.page.on("request", self._on_request)
 
     def _on_response_sync_hint(self, url: str, body: Optional[dict]) -> None:
         pass
+
+    async def _on_request(self, req) -> None:
+        """抓页面自己发出的 /confirm 表单：里面有只有页面 JS 能生成的防欺诈 token。"""
+        try:
+            u = req.url or ""
+            if "/payment_pages/" not in u or not u.split("?")[0].endswith("/confirm"):
+                return
+            if (req.method or "").upper() != "POST":
+                return
+            raw = req.post_data or ""
+            form = {}
+            for part in raw.split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    form[unquote_plus(k)] = unquote_plus(v)
+            if form:
+                self.hints.page_confirm_form = form
+                logger.info(f"已捕获页面原生 confirm 表单字段: {sorted(form.keys())[:12]}")
+                self._dump_debug("page_confirm_form", form, None)
+        except Exception as e:
+            logger.debug(f"抓页面 confirm 表单失败: {e}")
+
+    def _dump_debug(self, kind: str, form: Optional[Dict[str, Any]], res: Any) -> None:
+        """把真实报文落盘，用于字段级比对（脱敏：卡号/CVC 不在这些 body 里）。"""
+        if not (DEBUG_ON or kind.endswith("_error")):
+            return
+        try:
+            out = MANDATE_DIR.parent / "protocol_debug"
+            out.mkdir(parents=True, exist_ok=True)
+            path = out / ("%s_%s.json" % (time.strftime("%Y%m%d-%H%M%S"), kind))
+            payload = {
+                "kind": kind,
+                "cs": self.hints.cs_id,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "form_keys": sorted((form or {}).keys()),
+                "form": form,
+                "response": res,
+                "init_keys": self.hints.last_init_keys,
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            logger.info(f"🧪 协议报文已落盘: {path}")
+        except Exception as e:
+            logger.debug(f"debug 落盘失败: {e}")
 
     async def _on_response(self, resp) -> None:
         """旁路记录 Stripe 会话参数：cs_id / guid / due / customer / pm / pi。"""
@@ -413,8 +469,16 @@ class StripeProtocolPayer:
             return PayOutcome(stage="confirm", reason="缺少 payment_method", fallback_ok=True)
 
         form = self._build_confirm_form()
+        reused = False
+        if h.page_confirm_form:
+            # 页面原生提交过：复用它的防欺诈 token（只有页面 JS 生得出），本方的 pm / 金额覆盖
+            merged = dict(h.page_confirm_form)
+            merged.update(form)
+            form = merged
+            reused = True
         logger.info(f"协议阶段 [3/3] confirm 提交: cs={h.cs_id[:22]}… pm={h.payment_method} "
-                    f"expected_amount={h.amount_due} guid={'有' if h.guid else '无'}")
+                    f"expected_amount={h.amount_due} guid={'有' if h.guid else '无'} "
+                    f"token={'复用页面' if reused else '无(纯净版)'}")
         try:
             res = await self.page.evaluate(JS_POST_FORM,
                                            {"url": "%s/payment_pages/%s/confirm" % (API_BASE, h.cs_id),
@@ -432,9 +496,19 @@ class StripeProtocolPayer:
             d_code = err.get("decline_code") or ""
             msg = err.get("message") or (res or {}).get("text", "")[:200]
             logger.error(f"❌ 协议确认被拒 [{code}{(' / ' + d_code) if d_code else ''}] {msg}")
+            self._dump_debug("confirm_error", form, res)
+            # 卡级拒绝不回落（同一张卡白跑）；参数/会话/token 类错误必须回落 UI，
+            # 否则整笔支付直接死在这一步。
+            structural = code not in CARD_LEVEL_CODES
+            if structural:
+                logger.warning(
+                    f"该错误属结构性（{code}）：多为缺少页面生成的防欺诈 token 或字段名不符，"
+                    f"回落 UI 通道用页面原生提交完成"
+                )
             return PayOutcome(stage="confirm", reason=msg, code=code,
                               cs_id=h.cs_id, payment_method=h.payment_method,
-                              amount=h.amount_due or 0, currency=h.currency)
+                              amount=h.amount_due or 0, currency=h.currency,
+                              fallback_ok=structural)
 
         c_status = body.get("status")
         p_status = body.get("payment_status")
@@ -465,6 +539,21 @@ class StripeProtocolPayer:
         logger.warning(f"协议确认未终态: status={c_status} payment_status={p_status} pi={pi_status}")
         return PayOutcome(stage="confirm", reason="未终态: %s/%s" % (c_status, p_status),
                           code="unsettled", cs_id=h.cs_id, payment_method=h.payment_method)
+
+    async def replay_confirm(self, payment_method: Optional[str] = None) -> PayOutcome:
+        """补扣/重试：复用已捕获的页面 token 对同一 cs 再 confirm 一次。
+
+        用途：3DS 回来后终态未落、卡被临时拒后换卡重试、同会话补扣。
+        前提：同一 cs 尚未 complete；complete 之后 Stripe 侧不允许再 confirm。
+        """
+        h = self.hints
+        if payment_method:
+            h.payment_method = payment_method
+        if not h.page_confirm_form:
+            logger.warning("没有页面原生 token 缓存，重试只能走纯净版（大概率被参数校验拒）")
+        logger.info(f"协议重试 confirm: cs={h.cs_id[:22]}… pm={h.payment_method} "
+                    f"token={'有' if h.page_confirm_form else '无'}")
+        return await self.confirm()
 
     # ---------------- 5. 3DS 处理 ----------------
     async def handle_3ds(self, timeout: float = 150.0) -> bool:
