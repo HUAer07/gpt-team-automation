@@ -66,9 +66,15 @@ ZERO_DECIMAL = {
 # --------------------------------------------------------------------------
 JS_READ_PK = r"""
 () => {
+  const out = { pk_live: '', pk_test: '', host: location.host };
   const html = document.documentElement.innerHTML || '';
-  const m = html.match(/pk_(?:live|test)_[A-Za-z0-9]{10,}/);
-  return m ? m[0] : '';
+  const re = /pk_(live|test)_[A-Za-z0-9]{10,}/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const k = 'pk_' + m[1];
+    if (!out[k]) out[k] = m[0];
+  }
+  return out;
 }
 """
 
@@ -349,14 +355,68 @@ class StripeProtocolPayer:
             await asyncio.sleep(0.5)
         if not self.hints.pk:
             try:
-                pk = await self.page.evaluate(JS_READ_PK)
-                if isinstance(pk, str) and pk.startswith("pk_"):
-                    self.hints.pk = pk
+                got = await self.page.evaluate(JS_READ_PK)
+                if isinstance(got, dict):
+                    live, test = got.get("pk_live") or "", got.get("pk_test") or ""
+                    # cs_live 必须配 pk_live；只有 test 键时不要拿来打 live 会话
+                    self.hints.pk = live or test
+                    logger.info(f"publishable key: live={'有' if live else '无'} test={'有' if test else '无'} "
+                                f"(host={got.get('host')})")
+                elif isinstance(got, str) and got.startswith("pk_"):
+                    self.hints.pk = got
             except Exception:
                 pass
         return bool(self.hints.cs_id)
 
     # ---------------- 2. 绑卡：页面原生 createPaymentMethod ----------------
+    async def _bind_via_api_key(self, number: str, exp_month: int, exp_year: int, billing: Dict[str, Any]) -> PayOutcome:
+        """页面没有 window.Stripe 时（如 pay.openai.com 自建 checkout），
+        用 publishable key 直接 POST /v1/payment_methods —— Stripe.js 内部走的就是这条。"""
+        if not self.hints.pk:
+            return PayOutcome(stage="bind", reason="stripe_js_absent 且未读到 publishable key",
+                              code="stripe_js_absent", fallback_ok=True)
+        cs_live = self.hints.cs_id.startswith("cs_live")
+        if cs_live and self.hints.pk.startswith("pk_test"):
+            return PayOutcome(stage="bind", reason="cs_live 配到 pk_test，键与会话模式不符",
+                              code="key_mode_mismatch", fallback_ok=True)
+        addr = billing.get("address") or {}
+        form = {
+            "type": "card",
+            "card[number]": number,
+            "card[exp_month]": str(exp_month),
+            "card[exp_year]": str(exp_year),
+            "card[cvc]": (self.card.card_cvc or "").strip(),
+            "billing_details[name]": billing.get("name", ""),
+            "billing_details[email]": billing.get("email", ""),
+            "billing_details[address][country]": addr.get("country", ""),
+            "billing_details[address][line1]": addr.get("line1", ""),
+            "billing_details[address][city]": addr.get("city", ""),
+            "billing_details[address][state]": addr.get("state", ""),
+            "billing_details[address][postal_code]": addr.get("postal_code", ""),
+            "key": self.hints.pk,
+        }
+        logger.info("页面无 window.Stripe，改用 pk 直连 /v1/payment_methods 绑卡")
+        try:
+            res = await self.page.evaluate(JS_POST_FORM,
+                                           {"url": API_BASE + "/payment_methods", "form": form})
+        except Exception as e:
+            return PayOutcome(stage="bind", reason="pk 绑卡异常: %s" % e, code="bind_exception", fallback_ok=True)
+        status = (res or {}).get("status") or 0
+        body = (res or {}).get("json") or {}
+        if status == 200 and isinstance(body.get("id"), str):
+            self.hints.payment_method = body["id"]
+            c = body.get("card") or {}
+            self._bound = True
+            logger.success(f"协议阶段 [1/3] PaymentMethod 就绪(pk 直连): {body['id']} "
+                           f"({(c.get('brand') or 'card').upper()} *{c.get('last4') or number[-4:]})")
+            return PayOutcome(stage="bind", ok=True, payment_method=body["id"])
+        err = (body or {}).get("error") or {}
+        code = str(err.get("code") or "http_%s" % status)
+        logger.warning(f"pk 直连绑卡失败 [{code}] {err.get('message') or (res or {}).get('text', '')[:120]}")
+        self._dump_debug("bind_api_error", form, res)
+        return PayOutcome(stage="bind", reason=str(err.get("message") or status),
+                          code=code, fallback_ok=code not in CARD_LEVEL_CODES)
+
     async def bind_payment_method(self) -> PayOutcome:
         card = self.card
         number = re.sub(r"[\s-]", "", card.card_number or "")
@@ -395,6 +455,9 @@ class StripeProtocolPayer:
         if not isinstance(res, dict) or not res.get("ok"):
             reason = (res or {}).get("error", "unknown")
             code = reason.split(":")[0] if ":" in reason else reason
+            if code == "stripe_js_absent":
+                logger.info("页面无 window.Stripe（自建 checkout），尝试 pk 直连绑卡...")
+                return await self._bind_via_api_key(number, exp_month, exp_year, billing)
             # 结构性失败（页面没 Stripe.js / 执行异常）才回落 UI；
             # 卡被拒/卡号无效这类是同一张卡的问题，回落 UI 也是白跑一次。
             structural = code in ("stripe_js_absent", "bind_exception", "unknown", "invalid_exp")

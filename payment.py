@@ -870,6 +870,10 @@ class PaymentManager:
 
             # 6. 等待协议响应结果（集成 Arkose Labs 拼图检测、Cloudflare Turnstile 自动点击、双轨工作区激活感知与 180s 宽裕超时）
             hcaptcha_clicked = False
+            hcaptcha_clicks = 0
+            hcaptcha_last_click = 0.0
+            hcaptcha_solved = False
+            hcaptcha_gave_up = False
             turnstile_clicked = False
             challenge_alerted = False
             max_wait_seconds = 180  # 延长至 3 分钟 (180s)，给予充足的人工解题或手机秒付时间
@@ -960,26 +964,48 @@ class PaymentManager:
                     logger.success("✨ 【Arkose 质询攻克完成】验证弹窗已消除，等待 Stripe 结算确认...")
                     challenge_alerted = False
 
-                # 5. 持续检测并自动勾选可见的 hCaptcha 复选框
+                # 5. hCaptcha：先看 token，再限次点击（无限连点会重置挑战，越点越不过）
+                hcap_token = ""
                 for f in page.frames:
-                    f_url = f.url or ""
-                    if "hcaptcha.com" in f_url and "invisible" not in f_url:
+                    if "hcaptcha.com" in (f.url or ""):
                         try:
-                            cb = f.locator("#checkbox, [aria-label*='human'], [role='checkbox']").first
-                            if await cb.count() > 0 and await cb.is_visible():
-                                chk = await cb.get_attribute("aria-checked")
-                                if chk != "true":
-                                    logger.info("⚡ 检测到 Stripe hCaptcha [I am human] 复选框，正在模拟真实点击...")
+                            hcap_token = await f.evaluate(
+                                "() => { try { return (window.hcaptcha && window.hcaptcha.getResponse) ? "
+                                "window.hcaptcha.getResponse() : ''; } catch (e) { return ''; } }"
+                            ) or ""
+                        except Exception:
+                            hcap_token = ""
+                        if hcap_token:
+                            break
+
+                now_ts = asyncio.get_running_loop().time()
+                if hcap_token:
+                    if not hcaptcha_solved:
+                        logger.success("✅ hCaptcha 已通过（拿到 token），等待 Stripe 结算确认...")
+                        hcaptcha_solved = True
+                elif hcaptcha_clicks < 4 and now_ts - hcaptcha_last_click > 15:
+                    for f in page.frames:
+                        f_url = f.url or ""
+                        if "hcaptcha.com" in f_url and "invisible" not in f_url:
+                            try:
+                                cb = f.locator("#checkbox, [aria-label*='human'], [role='checkbox']").first
+                                if await cb.count() > 0 and await cb.is_visible():
+                                    logger.info(f"⚡ hCaptcha [I am human] 第 {hcaptcha_clicks + 1}/4 次点击")
                                     try:
                                         await cb.click(force=True, timeout=2000)
                                     except Exception:
                                         box = await cb.bounding_box()
                                         if box:
                                             await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                                    await asyncio.sleep(2.0)
+                                    hcaptcha_clicks += 1
+                                    hcaptcha_last_click = now_ts
                                     break
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
+                elif hcaptcha_clicks >= 4 and not hcaptcha_gave_up and not hcap_token:
+                    hcaptcha_gave_up = True
+                    logger.warning("hCaptcha 连点 4 次仍无 token：出口 IP / 浏览器指纹被判定为自动化。"
+                                   "建议改用手机长链秒付，或给 YesCaptcha 补 hCaptcha 额度后重试")
 
                 await asyncio.sleep(1.0)
 

@@ -42,12 +42,13 @@ class FakeRequest:
 class FakePage:
     """按 JS 片段里的特征分派，模拟页面内 Stripe.js 与 fetch 的返回。"""
 
-    def __init__(self, decline=False, no_stripe_js=False, param_error=False):
+    def __init__(self, decline=False, no_stripe_js=False, param_error=False, pk_mode="live"):
         self.url = "https://checkout.stripe.com/c/pay/cs_live_TEST123"
         self.handlers = {}
         self.decline = decline
         self.no_stripe_js = no_stripe_js
         self.param_error = param_error
+        self.pk_mode = pk_mode
         self.forms = []
         self.gotos = []
 
@@ -76,9 +77,14 @@ class FakePage:
             return {"ok": True, "id": "pm_1TestPmAbc", "brand": "visa", "last4": "4242"}
         if "data-checkout-session" in js or "__INITIAL_STATE__" in js:
             return {"guid": "guid_dom_fallback", "state_keys": ["guid", "session"]}
-        if "pk_(?:live|test)" in js:
-            return "pk_live_51TestPublishableKey"
+        if "pk_live" in js and "pk_test" in js:
+            if self.pk_mode == "none":
+                return {"pk_live": "", "pk_test": "", "host": "pay.openai.com"}
+            return {"pk_live": "pk_live_51TestPublishableKey", "pk_test": "", "host": "pay.openai.com"}
         url = arg.get("url", "")
+        if url.endswith("/payment_methods"):
+            self.forms.append(("payment_methods", arg.get("form")))
+            return {"status": 200, "json": {"id": "pm_from_pk_1", "card": {"brand": "visa", "last4": "4242"}}}
         if "setup_intents" in url:
             self.forms.append(("setup_intents", arg.get("form")))
             return {"status": 200, "json": {"id": "seti_1TestSeti", "status": "requires_payment_method"}}
@@ -160,7 +166,7 @@ async def scenario_declined():
 
 
 async def scenario_no_stripe_js():
-    page = FakePage(no_stripe_js=True)
+    page = FakePage(no_stripe_js=True, pk_mode="none")
     payer = pp.StripeProtocolPayer(page, card())
     await payer.attach()
     await page.fire_response(
@@ -170,7 +176,25 @@ async def scenario_no_stripe_js():
     out = await payer.pay()
     assert not out.ok
     assert out.fallback_ok is True, out.brief()
-    print("[ok] 页面无 Stripe.js: fallback_ok=%s -> 交由 UI 通道" % out.fallback_ok)
+    print("[ok] 无 Stripe.js 且无 pk: fallback_ok=%s -> 交由 UI 通道" % out.fallback_ok)
+
+
+async def scenario_pk_bind():
+    """pay.openai.com 现状：无 window.Stripe，但有 pk_live → 走 /v1/payment_methods 直连绑卡。"""
+    page = FakePage(no_stripe_js=True, pk_mode="live")
+    payer = pp.StripeProtocolPayer(page, card())
+    await payer.attach()
+    await page.fire_response(
+        "https://api.stripe.com/v1/payment_pages/cs_live_TEST123/init",
+        {"guid": "g1", "currency": "pln", "total_summary": {"due": 1600}},
+    )
+    out = await payer.pay()
+    assert out.payment_method == "pm_from_pk_1", out.payment_method
+    assert out.ok, out.brief()
+    used = dict(page.forms)["payment_methods"]
+    assert used["key"].startswith("pk_live_"), used.get("key")
+    assert used["card[number]"] == "4242424242424242", used.get("card[number]")
+    print("[ok] 无 Stripe.js → pk 直连绑卡: pm=%s ok=%s" % (out.payment_method, out.ok))
 
 
 async def scenario_no_session():
@@ -228,6 +252,7 @@ async def main():
     await scenario_ok()
     await scenario_declined()
     await scenario_no_stripe_js()
+    await scenario_pk_bind()
     await scenario_no_session()
     await scenario_param_missing()
     await scenario_reuse_page_tokens()
