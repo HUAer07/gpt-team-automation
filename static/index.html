@@ -472,6 +472,11 @@
               <i class="fa-solid fa-link"></i>
               <span>提取长链</span>
             </button>
+            <!-- 子号空间体检 -->
+            <button onclick="auditChildrenSpaces()" class="px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/30 font-semibold text-xs flex items-center space-x-1.5 transition">
+              <i class="fa-solid fa-magnifying-glass-chart"></i>
+              <span>子号空间体检</span>
+            </button>
             <!-- 启动全流程 -->
             <button id="btn-start" onclick="startPipeline()" class="flex-1 sm:flex-none px-5 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/25 flex items-center justify-center space-x-1.5 transition">
               <i class="fa-solid fa-play"></i>
@@ -1171,6 +1176,52 @@
         }
       } catch (e) {
         alert('请求失败: ' + e.message);
+      }
+    }
+
+    // 子号空间体检：每个子号挂了几个空间 / 谁没有空间
+    async function auditChildrenSpaces() {
+      appendLog('info', '🧪 开始子号空间体检（逐个登录核对空间归属）...');
+      try {
+        const res = await fetch('/api/children/audit', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({concurrency: 1})
+        });
+        const ret = await res.json();
+        if (ret.status !== 'success') {
+          alert(ret.detail || ret.message || '体检失败');
+          return;
+        }
+        const rows = (ret.reports || []).map(r => {
+          const ws = (r.workspaces || []).map(w => `${w.name || '?'}(${w.plan_type || '?'})`).join(', ') || '-';
+          const color = r.status === 'ok' ? 'text-emerald-400'
+                      : r.status === 'no_space' ? 'text-amber-400'
+                      : r.status === 'multi_space' ? 'text-rose-400' : 'text-slate-400';
+          return `<tr class="border-t border-slate-800">
+            <td class="py-1.5 pr-3">${r.email}</td>
+            <td class="py-1.5 pr-3 ${color}">${r.status}</td>
+            <td class="py-1.5 pr-3">${r.workspace_count}</td>
+            <td class="py-1.5 pr-3 text-slate-400">${ws}</td>
+          </tr>`;
+        }).join('');
+        const html = `<div class="text-xs">
+          <div class="mb-2 text-slate-300">共 ${ret.total} 个：正常 ${(ret.ok||[]).length} · 多空间 ${(ret.multi_space||[]).length} · 无空间 ${(ret.no_space||[]).length} · 失败 ${(ret.failed||[]).length}</div>
+          ${(ret.no_space||[]).length ? `<div class="mb-1 text-amber-400">无空间: ${ret.no_space.join(', ')}</div>` : ''}
+          ${(ret.multi_space||[]).length ? `<div class="mb-2 text-rose-400">多空间: ${ret.multi_space.join(', ')}</div>` : ''}
+          <table class="w-full text-left">
+            <thead class="text-slate-500"><tr><th class="pr-3">子号</th><th class="pr-3">状态</th><th class="pr-3">空间数</th><th class="pr-3">空间</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table></div>`;
+        const w = window.open('', '_blank', 'width=980,height=620');
+        if (w) {
+          w.document.write('<title>子号空间体检</title><body style="background:#0b1220;color:#e2e8f0;font-family:ui-sans-serif;padding:18px">' + html + '</body>');
+          w.document.close();
+        }
+        appendLog((ret.no_space||[]).length ? 'warning' : 'success',
+          `🧪 体检完成：多空间 ${(ret.multi_space||[]).length}，无空间 ${(ret.no_space||[]).length}，失败 ${(ret.failed||[]).length}`);
+      } catch (e) {
+        appendLog('error', '子号空间体检异常: ' + e);
       }
     }
 

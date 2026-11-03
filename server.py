@@ -305,6 +305,7 @@ class PipelineState:
         self.step_message = "空闲就绪"
         self.status = "idle"  # idle, running, completed, error
         self.checkout_url = ""
+        self.last_child_audit: Optional[Dict[str, Any]] = None
         self.failed_step: int = 1
         self.start_step: int = 1
         self.logs: List[Dict[str, Any]] = []
@@ -748,6 +749,67 @@ async def manual_extract_link():
     except Exception as e:
         emit_log("error", f"提取长链异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/children/audit")
+async def audit_children_endpoint(payload: Optional[dict] = None):
+    """子号空间体检：每个子号挂在几个空间、谁没有空间、谁挂了多个。
+
+    body: {"email": "只查一个（可选）", "concurrency": 1}
+    """
+    if state.is_running:
+        raise HTTPException(status_code=400, detail="后台有任务正在运行，稍后再体检（避免抢浏览器与子号会话）")
+
+    import child_audit as ca
+
+    pool = settings.children if settings.children else ([settings.child] if settings.child.email else [])
+    if not pool:
+        raise HTTPException(status_code=400, detail="未配置任何子号")
+
+    target_email = ""
+    concurrency = 1
+    if payload:
+        target_email = str(payload.get("email") or "").strip().lower()
+        try:
+            concurrency = max(1, min(3, int(payload.get("concurrency") or 1)))
+        except Exception:
+            concurrency = 1
+
+    accounts = pool
+    if target_email:
+        accounts = [a for a in pool if a.email.strip().lower() == target_email]
+        if not accounts:
+            raise HTTPException(status_code=404, detail=f"未找到子号: {target_email}")
+
+    emit_log("info", f"🧪 [子号体检] 开始检查 {len(accounts)} 个子号的空间归属...")
+    try:
+        reports = await ca.audit_children(accounts, concurrency=concurrency)
+    except Exception as e:
+        emit_log("error", f"🧪 [子号体检] 执行异常: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    summary = ca.summarize(reports)
+    for r in reports:
+        lvl = {"ok": "info", "multi_space": "warning", "no_space": "warning"}.get(r.status, "error")
+        emit_log(lvl, f"🧪 [子号体检] {r.brief()}")
+    if summary["no_space"]:
+        emit_log("warning", "🧪 无空间子号: " + ", ".join(summary["no_space"]))
+    if summary["multi_space"]:
+        emit_log("warning", "🧪 多空间子号: " + ", ".join(summary["multi_space"]))
+    emit_log("success",
+             f"🧪 [子号体检] 完成：共 {summary['total']}，正常 {len(summary['ok'])}，"
+             f"多空间 {len(summary['multi_space'])}，无空间 {len(summary['no_space'])}，"
+             f"失败 {len(summary['failed'])}")
+
+    state.last_child_audit = summary
+    await broadcast_event("children_audit", summary)
+    return {"status": "success", **summary}
+
+
+@app.get("/api/children/audit/last")
+async def last_children_audit():
+    """取最近一次子号体检结果（不触发新检查）"""
+    return {"status": "success", "result": getattr(state, "last_child_audit", None)}
+
 
 @app.get("/api/payment/mandates")
 async def get_payment_mandates():

@@ -225,3 +225,39 @@ ALL PURE-PROTOCOL SELFTESTS PASSED
 | 换 pm 补扣 | ✅ | `--pm`，token 复用 |
 | `POST /payment_methods` 绑新卡 | ❌ 本店禁用 | 400 `unsupported for publishable key tokenization` |
 | `POST /setup_intents` | ❌ 同 | 同上（pk 权限不足） |
+
+---
+
+## 子号空间体检（谁有多个空间 / 谁没有空间）
+
+逐个登录子号，核对它到底挂在哪几个 Team 空间里。
+
+```bash
+# 命令行（本地或容器内）
+python -m child_audit                 # 检查 .env 里全部子号
+python -m child_audit --email a@b.com # 只查一个
+python -m child_audit --json out.json # 另存 JSON
+```
+
+控制台右上角新增「**子号空间体检**」按钮，或直接打接口：
+
+```bash
+curl -s -X POST http://127.0.0.1:8899/api/children/audit \
+  -u admin:*** -H 'Content-Type: application/json' -d '{"concurrency":1}'
+curl -s http://127.0.0.1:8899/api/children/audit/last      # 取上次结果，不触发新检查
+```
+
+判定口径：
+
+| status | 含义 | 处置建议 |
+| --- | --- | --- |
+| `ok` | 只有 1 个空间 | 正常 |
+| `multi_space` | ≥2 个空间 | 占席位、易风控，核对是否残留旧空间 |
+| `no_space` | 0 个空间 | 未入组或已被移出，需重新邀请 |
+| `login_failed` | 登录拿不到 access_token | 密码/2FA 或风控 |
+| `error` | 登录或接口异常 | 看 detail 原因（如 Cloudflare） |
+
+并发默认 1（串行），因为同一出口 IP 并发登录子号容易触发风控；接口会把并发上限压到 3。
+流水线运行中会直接拒绝（400），避免抢浏览器与子号会话。
+
+自检：`python tests/selftest_child_audit.py`（5 种分类全覆盖，不联网）
