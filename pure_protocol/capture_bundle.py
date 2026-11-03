@@ -54,12 +54,14 @@ JS_PK = r"""
 
 
 class BundleCapture:
-    def __init__(self, url: str, out: str, autofill: bool, wait_s: int, proxy: Optional[str]):
+    def __init__(self, url: str, out: str, autofill: bool, wait_s: int, proxy: Optional[str],
+                 email: str = ""):
         self.url = url
         self.out = Path(out)
         self.autofill = autofill
         self.wait_s = wait_s
         self.proxy = proxy
+        self.email = (email or "").strip()
         self.data: Dict[str, Any] = {
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "checkout_url": url,
@@ -237,6 +239,14 @@ class BundleCapture:
     async def _fill_and_submit(self, page, card: CardConfig):
         """按现有 UI 路径的选择器填表并提交（只为触发页面发 /confirm）。"""
         try:
+            # 邮箱是 REQUIRED，空着表单永远不提交
+            email_loc = page.locator("#email")
+            if await email_loc.count() > 0 and await email_loc.is_visible():
+                if not (await email_loc.input_value()):
+                    await email_loc.fill(self.email or "billing@example.com")
+                    logger.info("已填邮箱: %s", (self.email or "billing@example.com"))
+                    await asyncio.sleep(0.3)
+
             loc = page.locator("#cardNumber")
             await loc.wait_for(state="visible", timeout=25000)
             num = re.sub(r"[\s-]", "", card.card_number)
@@ -250,12 +260,34 @@ class BundleCapture:
             name_loc = page.locator("#billingName")
             if await name_loc.count() > 0:
                 await name_loc.fill((card.card_name or "ChatGPT User").strip())
+            # 账单国家：页面按出口 IP 默认（如 PL），必须与卡配置一致
+            want_c = (card.billing_country or "US").strip().upper()
+            c_loc = page.locator("#billingCountry")
+            if await c_loc.count() > 0 and not await c_loc.is_disabled():
+                cur_c = (await c_loc.input_value() or "").strip().upper()
+                if want_c and cur_c != want_c:
+                    try:
+                        await c_loc.select_option(want_c)
+                        logger.info("账单国家 %s -> %s", cur_c, want_c)
+                        await asyncio.sleep(1.5)
+                    except Exception as e:
+                        logger.warning(f"切换国家失败: {e}")
+
             for sel, val in (("#billingAddressLine1", card.billing_line1),
                              ("#billingLocality", card.billing_city),
                              ("#billingPostalCode", card.billing_zip)):
                 el = page.locator(sel)
                 if val and await el.count() > 0 and await el.is_visible():
                     await el.fill(val)
+
+            # 关掉 Google 地址联想下拉，否则它挡住后续输入与提交按钮
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.8)
+                await page.keyboard.press("Escape")
+                logger.info("已按 Esc 关闭地址联想遮罩")
+            except Exception:
+                pass
 
             # 州/省：select 必须走 JS 选值（payment.py 里同一套逻辑）
             st_loc = page.locator("#billingAdministrativeArea")
@@ -293,6 +325,13 @@ class BundleCapture:
             try:
                 await page.screenshot(path="/app/data/capture_after_submit.png", full_page=True)
                 logger.info("已截图 /app/data/capture_after_submit.png")
+                errs = await page.evaluate("""() => {
+                    const sel = '[role=alert], .Error, .ErrorText, [data-testid*=error], .FieldError';
+                    return Array.from(document.querySelectorAll(sel))
+                        .map(e => (e.innerText || '').trim()).filter(Boolean).slice(0, 6);
+                }""")
+                if errs:
+                    logger.warning(f"页面校验提示: {errs}")
             except Exception:
                 pass
         except Exception as e:
@@ -306,8 +345,10 @@ def main(argv=None) -> int:
     ap.add_argument("--autofill", action="store_true", help="用 .env 里的卡自动填表并提交")
     ap.add_argument("--wait", type=int, default=180, help="等 /confirm 的秒数")
     ap.add_argument("--proxy", default="", help="覆盖代理")
+    ap.add_argument("--email", default="", help="账单邮箱（REQUIRED，默认用母号邮箱/占位）")
     a = ap.parse_args(argv)
-    cap = BundleCapture(a.url, a.out, a.autofill, a.wait, a.proxy.strip() or None)
+    email = a.email or (settings.master.email or "")
+    cap = BundleCapture(a.url, a.out, a.autofill, a.wait, a.proxy.strip() or None, email)
     return asyncio.run(cap.run())
 
 
