@@ -168,6 +168,7 @@ class ThreeDSBridge:
             deadline = time.time() + self.wait_s
             last_shot = 0.0
             attempts = 0
+            state = {"clicks": 0, "last": 0.0, "solved": False}
             while time.time() < deadline:
                 await asyncio.sleep(2.0)
                 now = time.time()
@@ -180,6 +181,9 @@ class ThreeDSBridge:
                 if "pay.openai.com" in cur and "/c/pay" not in cur:
                     self.result.update({"ok": True, "stage": "done", "reason": f"redirect:{cur[:80]}"})
                     break
+
+                # hCaptcha「I am human」：限次点击，拿到 token 就等页面继续
+                await self._handle_hcaptcha(page, state)
 
                 info = await self._find_otp(page)
                 if info:
@@ -236,6 +240,63 @@ class ThreeDSBridge:
         except Exception as e:
             logger.debug(f"{label or sel} 填写失败: {e}")
             return False
+
+    async def _handle_hcaptcha(self, page, state) -> None:
+        """hCaptcha 复选框：拿到 token 就标记解决；否则限 5 次、间隔 ≥12s 点击。"""
+        token = ""
+        for f in page.frames:
+            if "hcaptcha.com" not in (f.url or ""):
+                continue
+            try:
+                token = await f.evaluate(
+                    "() => { try { return (window.hcaptcha && window.hcaptcha.getResponse) ? "
+                    "window.hcaptcha.getResponse() : ''; } catch (e) { return ''; } }"
+                ) or ""
+            except Exception:
+                token = ""
+            if token:
+                break
+        if token:
+            if not state["solved"]:
+                state["solved"] = True
+                logger.success(f"hCaptcha token 已拿到（{len(token)} 字符），等待继续")
+                self.result["stage"] = "captcha_passed"
+            return
+        now = time.time()
+        if state["clicks"] >= 5 or now - state["last"] < 12:
+            return
+        for f in page.frames:
+            f_url = f.url or ""
+            if "hcaptcha.com" not in f_url or "invisible" in f_url:
+                continue
+            try:
+                cb = f.locator("#checkbox, [aria-label*='human'], [role='checkbox']").first
+                if await cb.count() > 0 and await cb.is_visible():
+                    box = await cb.bounding_box()
+                    state["clicks"] += 1
+                    state["last"] = now
+                    logger.info(f"hCaptcha 点击 {state['clicks']}/5（框 {box}）")
+                    if box:
+                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    else:
+                        await cb.click(force=True, timeout=2000)
+                    await asyncio.sleep(3.0)
+                    await self._shot(page)
+                    return
+            except Exception as e:
+                logger.debug(f"hCaptcha 点击失败: {e}")
+        # 兜底：按标题找中心点
+        try:
+            modal = page.locator("text=I am human").first
+            if await modal.count() > 0:
+                box = await modal.bounding_box()
+                if box and state["clicks"] < 5:
+                    state["clicks"] += 1
+                    state["last"] = now
+                    logger.info(f"hCaptcha 按文本定位点击 {state['clicks']}/5")
+                    await page.mouse.click(box["x"] - 40, box["y"] + box["height"] / 2)
+        except Exception:
+            pass
 
     async def _fill(self, page) -> None:
         card = self.card
