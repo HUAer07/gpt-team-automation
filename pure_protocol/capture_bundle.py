@@ -160,11 +160,20 @@ class BundleCapture:
             if self.autofill and card.card_number:
                 await self._fill_and_submit(page, card)
 
-            # 等 confirm 被抓到（或超时）
+            # 等 confirm 被抓到（或超时）；期间限次点击 hCaptcha
             deadline = time.time() + self.wait_s
+            clicks, last_click = 0, 0.0
             while time.time() < deadline:
                 if (self.data.get("confirm") or {}).get("body"):
+                    logger.success("已抓到 /confirm，取料完成")
                     break
+                now = time.time()
+                if clicks < 4 and now - last_click > 15:
+                    clicked = await self._click_hcaptcha(page)
+                    if clicked:
+                        clicks += 1
+                        last_click = now
+                        logger.info(f"hCaptcha 点击 {clicks}/4")
                 await asyncio.sleep(2.0)
 
             try:
@@ -193,6 +202,37 @@ class BundleCapture:
             logger.warning("没抓到 /confirm：bundle 只能跑 status；"
                            "要跑 confirm 必须在页面上真实提交一次（或被 hCaptcha 挡住）")
         return 0 if has_confirm else 3
+
+    async def _click_hcaptcha(self, page) -> bool:
+        """限次点击 hCaptcha 复选框；拿到 token 就提前返回。"""
+        for f in page.frames:
+            f_url = f.url or ""
+            if "hcaptcha.com" not in f_url:
+                continue
+            try:
+                token = await f.evaluate(
+                    "() => { try { return (window.hcaptcha && window.hcaptcha.getResponse) ? "
+                    "window.hcaptcha.getResponse() : ''; } catch (e) { return ''; } }"
+                )
+                if token:
+                    logger.success("hCaptcha token 已拿到")
+                    return False
+            except Exception:
+                pass
+            if "invisible" in f_url:
+                continue
+            try:
+                cb = f.locator("#checkbox, [aria-label*='human'], [role='checkbox']").first
+                if await cb.count() > 0 and await cb.is_visible():
+                    box = await cb.bounding_box()
+                    if box:
+                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    else:
+                        await cb.click(force=True, timeout=2000)
+                    return True
+            except Exception:
+                pass
+        return False
 
     async def _fill_and_submit(self, page, card: CardConfig):
         """按现有 UI 路径的选择器填表并提交（只为触发页面发 /confirm）。"""
