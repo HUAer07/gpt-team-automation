@@ -148,14 +148,6 @@ async def master_keepalive_loop(interval_seconds: int = 300) -> None:
 @app.on_event("startup")
 async def _start_master_keepalive():
     global _MASTER_KEEPALIVE_TASK
-    if _MASTER_KEEPALIVE_TASK and not _MASTER_KEEPALIVE_TASK.done():
-        return
-    try:
-        interval = int(os.environ.get("MASTER_KEEPALIVE_SECONDS", "300"))
-    except Exception:
-        interval = 300
-    _MASTER_KEEPALIVE_TASK = asyncio.create_task(master_keepalive_loop(interval))
-    asyncio.create_task(_warmup_master_session())
     # 上次的体检数字：进控制台就能看见，不用先跑一次
     try:
         audit_file = Path(__file__).parent / "data" / "children_audit_last.json"
@@ -164,6 +156,20 @@ async def _start_master_keepalive():
             logger.info(f"[子号体检] 已载入上次结果: total={state.last_child_audit.get('total')}")
     except Exception as e:
         logger.debug(f"载入上次体检结果失败: {e}")
+
+    # 默认彻底关闭后台自动保活轮询与自启预热，仅在需要时显式开启
+    if os.environ.get("ENABLE_MASTER_KEEPALIVE", "false").lower() not in ("1", "true", "yes"):
+        logger.info("[母号保活] 后台自动核验轮询已关闭，仅在手动点击或任务执行时按需登录")
+        return
+
+    if _MASTER_KEEPALIVE_TASK and not _MASTER_KEEPALIVE_TASK.done():
+        return
+    try:
+        interval = int(os.environ.get("MASTER_KEEPALIVE_SECONDS", "300"))
+    except Exception:
+        interval = 300
+    _MASTER_KEEPALIVE_TASK = asyncio.create_task(master_keepalive_loop(interval))
+    asyncio.create_task(_warmup_master_session())
 
 
 async def _warmup_master_session(delay: float = 6.0) -> None:
@@ -1203,17 +1209,18 @@ async def run_pipeline_worker(start_from_step: int = 1, total_batches: int = 1):
         state.status = "completed"
         state.step_message = f"批量流水线已圆满完成 (共交付 {completed_batches} 个 Team 工作区)" if total_batches > 1 else "全流程已成功完成"
 
-        # 收尾体检：母号刚被踢出工作区，确认账号级登录态没跟着掉；掉线就地自动重登
-        try:
-            ka = await master_keepalive_tick()
-            if ka == "ok":
-                emit_log("success", "🔒 [收尾体检] 母号登录态仍有效（token/cookie 已刷新落盘），可继续下一批")
-            elif ka == "failed":
-                emit_log("warning", "🔒 [收尾体检] 母号会话本轮未恢复，保活线程会继续重试")
-            else:
-                emit_log("info", f"🔒 [收尾体检] 结果: {ka}")
-        except Exception as e:
-            emit_log("warning", f"🔒 [收尾体检] 异常: {e}")
+        # 收尾体检：仅在明确开启保活配置时执行
+        if os.environ.get("ENABLE_MASTER_KEEPALIVE", "false").lower() in ("1", "true", "yes"):
+            try:
+                ka = await master_keepalive_tick()
+                if ka == "ok":
+                    emit_log("success", "🔒 [收尾体检] 母号登录态仍有效（token/cookie 已刷新落盘），可继续下一批")
+                elif ka == "failed":
+                    emit_log("warning", "🔒 [收尾体检] 母号会话本轮未恢复，保活线程会继续重试")
+                else:
+                    emit_log("info", f"🔒 [收尾体检] 结果: {ka}")
+            except Exception as e:
+                emit_log("warning", f"🔒 [收尾体检] 异常: {e}")
         state.failed_step = 1  # 成功后重置断点步骤为 1
         await broadcast_event("state_change", {"step": 5, "failed_step": 1, "status": "completed", "msg": state.step_message})
 
