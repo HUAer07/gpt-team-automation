@@ -1213,6 +1213,49 @@
       }
     }
 
+    // 体检结果弹窗：可关闭（✕ / 底部按钮 / 点遮罩 / Esc）
+    function openAuditModal(d) {
+      const modal = document.getElementById('audit-modal');
+      const body = document.getElementById('audit-modal-body');
+      const sum = document.getElementById('audit-modal-summary');
+      if (!modal || !body) return;
+      const rows = (d.reports || []).map(r => {
+        const ws = (r.workspaces || []).map(w => `${w.name || '?'}(${w.plan_type || '?'})`).join(', ') || '-';
+        const color = r.status === 'ok' ? 'text-emerald-400'
+                    : r.status === 'no_space' ? 'text-amber-400'
+                    : r.status === 'multi_space' ? 'text-rose-400' : 'text-slate-400';
+        return `<tr class="border-t border-slate-800">
+          <td class="py-2 pr-3 whitespace-nowrap">${r.email}</td>
+          <td class="py-2 pr-3 ${color} whitespace-nowrap">${r.status}</td>
+          <td class="py-2 pr-3">${r.workspace_count}</td>
+          <td class="py-2 pr-3 text-slate-400">${ws}</td>
+          <td class="py-2 pr-3 text-slate-500 text-[11px]">${r.detail || ''}</td>
+        </tr>`;
+      }).join('');
+      if (sum) {
+        sum.textContent = `共 ${d.total || 0} · 正常 ${(d.ok || []).length} · 无空间 ${(d.no_space || []).length} · 多空间 ${(d.multi_space || []).length} · 失败 ${(d.failed || []).length}`;
+      }
+      body.innerHTML = `
+        ${(d.no_space || []).length ? `<div class="mb-2 text-amber-400">⚠️ 无空间: ${d.no_space.join(', ')}</div>` : ''}
+        ${(d.multi_space || []).length ? `<div class="mb-2 text-rose-400">⚠️ 多空间: ${d.multi_space.join(', ')}</div>` : ''}
+        ${(d.failed || []).length ? `<div class="mb-2 text-slate-400">检查失败: ${d.failed.join(', ')}</div>` : ''}
+        <table class="w-full text-left">
+          <thead class="text-slate-500 text-[11px]">
+            <tr><th class="pr-3 pb-1">子号</th><th class="pr-3 pb-1">状态</th><th class="pr-3 pb-1">空间数</th><th class="pr-3 pb-1">空间</th><th class="pr-3 pb-1">说明</th></tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="5" class="py-3 text-slate-500">无数据</td></tr>'}</tbody>
+        </table>`;
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeAuditModal() {
+      const modal = document.getElementById('audit-modal');
+      if (!modal) return;
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
     // 页面打开时拉上次结果，直接显示数字
     async function loadAuditStats() {
       try {
@@ -1257,11 +1300,7 @@
             <thead class="text-slate-500"><tr><th class="pr-3">子号</th><th class="pr-3">状态</th><th class="pr-3">空间数</th><th class="pr-3">空间</th></tr></thead>
             <tbody>${rows}</tbody>
           </table></div>`;
-        const w = window.open('', '_blank', 'width=980,height=620');
-        if (w) {
-          w.document.write('<title>子号空间体检</title><body style="background:#0b1220;color:#e2e8f0;font-family:ui-sans-serif;padding:18px">' + html + '</body>');
-          w.document.close();
-        }
+        openAuditModal(ret);
         appendLog((ret.no_space||[]).length ? 'warning' : 'success',
           `🧪 体检完成：多空间 ${(ret.multi_space||[]).length}，无空间 ${(ret.no_space||[]).length}，失败 ${(ret.failed||[]).length}`);
       } catch (e) {
@@ -1673,6 +1712,11 @@
       // 子号体检数字面板：进页面就显示上次结果，并每分钟刷新
       loadAuditStats();
       setInterval(loadAuditStats, 60000);
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeAuditModal();
+      });
+      const m = document.getElementById('audit-modal');
+      if (m) m.addEventListener('click', (e) => { if (e.target === m) closeAuditModal(); });
     });
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -1704,5 +1748,28 @@
       });
     });
   </script>
+  <!-- 子号空间体检结果弹窗（可关闭） -->
+  <div id="audit-modal" class="hidden fixed inset-0 z-[9999] items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div class="w-full max-w-4xl max-h-[85vh] flex flex-col bg-dark-900 border border-sky-500/30 rounded-2xl shadow-2xl overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-dark-950/60">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-users-rectangle text-sky-400"></i>
+          <span class="text-sm font-bold text-white">子号空间体检</span>
+          <span id="audit-modal-summary" class="text-[11px] text-slate-400"></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="closeAuditModal()" title="关闭 (Esc)"
+                  class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5">
+            <i class="fa-solid fa-xmark"></i><span>关闭</span>
+          </button>
+        </div>
+      </div>
+      <div id="audit-modal-body" class="px-5 py-4 overflow-auto text-xs text-slate-200"></div>
+      <div class="px-5 py-3 border-t border-slate-800 flex justify-end gap-2 bg-dark-950/40">
+        <button onclick="closeAuditModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition">关闭</button>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
