@@ -61,7 +61,8 @@ def main():
 
     # 5) server 的 ConfigPayload 认识这个字段
     import server
-    payload = server.ConfigPayload(master_email="a@b.c", master_password="x", seat_quantity=7)
+    payload = server.ConfigPayload(master_email="a@b.c", master_password="x",
+                                   master_totp_secret="", seat_quantity=7)
     assert payload.seat_quantity == 7
     print("[ok] ConfigPayload.seat_quantity 可传（示例 7）")
 
