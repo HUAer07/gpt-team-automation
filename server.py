@@ -386,6 +386,7 @@ class ConfigPayload(BaseModel):
     headless: bool = True
     step_delay_seconds: int = 15
     workspace_name: str = "Team Workspace"
+    seat_quantity: int = 3
     promo_code: Optional[str] = ""
     promo_codes_raw: Optional[str] = ""
     promo_codes: Optional[List[str]] = None
@@ -469,6 +470,7 @@ async def get_config():
         "headless": env_vals.get("HEADLESS", "false").lower() == "true",
         "step_delay_seconds": int(env_vals.get("STEP_DELAY_SECONDS", settings.step_delay)),
         "workspace_name": env_vals.get("WORKSPACE_NAME", settings.card.workspace_name),
+        "seat_quantity": int(env_vals.get("SEAT_QUANTITY", settings.card.seat_quantity) or 3),
         "promo_code": parsed_promos[0] if parsed_promos else "",
         "promo_codes_raw": raw_promos,
         "promo_codes": parsed_promos,
@@ -542,6 +544,7 @@ async def update_config(payload: ConfigPayload):
     set_key(str(ENV_FILE), "HEADLESS", "true" if payload.headless else "false")
     set_key(str(ENV_FILE), "STEP_DELAY_SECONDS", str(payload.step_delay_seconds))
     set_key(str(ENV_FILE), "WORKSPACE_NAME", payload.workspace_name)
+    set_key(str(ENV_FILE), "SEAT_QUANTITY", str(max(1, min(20, payload.seat_quantity or 3))))
     set_key(str(ENV_FILE), "PROMO_CODE", first_promo)
     set_key(str(ENV_FILE), "PROMO_CODES_RAW", raw_promos_text)
     set_key(str(ENV_FILE), "CARD_NUMBER", payload.card_number or "")
@@ -580,6 +583,7 @@ async def update_config(payload: ConfigPayload):
     settings.headless = payload.headless
     settings.step_delay = payload.step_delay_seconds
     settings.card.workspace_name = payload.workspace_name
+    settings.card.seat_quantity = max(1, min(20, payload.seat_quantity or 3))
     settings.card.promo_code = first_promo
     settings.card.promo_codes_raw = raw_promos_text
     settings.card.promo_codes = promos_to_save

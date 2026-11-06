@@ -201,6 +201,8 @@ class CardConfig(BaseModel):
     card_name: str = Field(default_factory=lambda: os.getenv("CARD_NAME", "ChatGPT User"))
     auto_pay: bool = Field(default_factory=lambda: os.getenv("AUTO_PAY", "false").lower() == "true")
     workspace_name: str = Field(default_factory=lambda: os.getenv("WORKSPACE_NAME", "Team Workspace"))
+    # 提链席位数：Team 套餐按席位计价，默认 3，可在控制台自选
+    seat_quantity: int = Field(default_factory=lambda: int((os.getenv("SEAT_QUANTITY", "3") or "3").strip() or 3))
     promo_code: str = Field(default_factory=lambda: os.getenv("PROMO_CODE", ""))
     promo_codes_raw: str = Field(default_factory=lambda: os.getenv("PROMO_CODES_RAW", ""))
     promo_codes: List[str] = Field(default_factory=list)

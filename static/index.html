@@ -232,6 +232,25 @@
             <input type="text" id="workspace_name" placeholder="Team Workspace" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition">
           </div>
 
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1 flex items-center justify-between">
+              <span>提链席位数 (seat_quantity)</span>
+              <span id="seat_hint" class="text-[11px] text-slate-500">默认 3 席</span>
+            </label>
+            <select id="seat_quantity" onchange="onSeatChange()" class="w-full bg-dark-950 border border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-200 focus:outline-none focus:border-brand-500 transition cursor-pointer">
+              <option value="1">1 席</option>
+              <option value="2">2 席</option>
+              <option value="3" selected>3 席（默认，含母号）</option>
+              <option value="4">4 席</option>
+              <option value="5">5 席</option>
+              <option value="6">6 席</option>
+              <option value="8">8 席</option>
+              <option value="10">10 席</option>
+              <option value="15">15 席</option>
+              <option value="20">20 席</option>
+            </select>
+          </div>
+
           <!-- 批量优惠码配置模块 -->
           <div class="bg-dark-950/70 border border-amber-500/30 rounded-xl p-3.5 space-y-2.5">
             <div class="flex items-center justify-between">
@@ -987,6 +1006,12 @@
         
         // 支付与免税地址配置
         document.getElementById('workspace_name').value = data.workspace_name || 'Team Workspace';
+        const seatSel = document.getElementById('seat_quantity');
+        if (seatSel) {
+          const v = String(data.seat_quantity || 3);
+          seatSel.value = Array.from(seatSel.options).some(o => o.value === v) ? v : '3';
+          onSeatChange();
+        }
         
         // 载入多优惠码配置
         let rawPromoText = data.promo_codes_raw || '';
@@ -1072,6 +1097,7 @@
         headless: document.getElementById('headless').checked,
         step_delay_seconds: parseInt(document.getElementById('step_delay_seconds').value),
         workspace_name: document.getElementById('workspace_name').value.trim(),
+        seat_quantity: parseInt(document.getElementById('seat_quantity').value || '3'),
         promo_code: firstPromo,
         promo_codes_raw: promoRaw,
         promo_codes: parsedPromos,
@@ -1306,6 +1332,18 @@
       } catch (e) {
         appendLog('error', '子号空间体检异常: ' + e);
       }
+    }
+
+    // 席位数变更：即时提示，避免误选
+    function onSeatChange() {
+      const sel = document.getElementById('seat_quantity');
+      const hint = document.getElementById('seat_hint');
+      if (!sel || !hint) return;
+      const n = parseInt(sel.value || '3');
+      const price = { 1: 105, 2: 105, 3: 105, 4: 140, 5: 175, 6: 210, 8: 280, 10: 350, 15: 525, 20: 700 };
+      hint.textContent = n <= 3
+        ? `${n} 席 · 原价 PLN ${price[n] || 105}/月（3 席内同价）`
+        : `${n} 席 · 原价 PLN ${price[n] || (n * 35)}/月（按 35/席）`;
     }
 
     // 仅提取长链

@@ -51,6 +51,21 @@ class PaymentManager:
         # 最近一次支付的协议级结果（server.py 用来打日志/落库展示）
         self.last_outcome: Optional[PayOutcome] = None
 
+    def _seat_quantity(self) -> int:
+        """提链席位数：读配置并夹在 1..20。
+
+        注意 0/负数不是"未设置"，而是非法值 —— 要夹到 1；
+        只有 None/空串才回退默认 3。
+        """
+        raw = getattr(settings.card, "seat_quantity", 3)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return 3
+        try:
+            n = int(raw)
+        except Exception:
+            return 3
+        return max(1, min(20, n))
+
     async def _detect_proxy_country(self, proxy_str: Optional[str]) -> Optional[str]:
         """通过指定代理请求 Cloudflare trace 识别代理出口国家代码 (如 CO / US / TR)"""
         if not proxy_str or not proxy_str.strip():
@@ -108,7 +123,7 @@ class PaymentManager:
             candidates_promo = [""]
 
         eval_js = """
-                    async ({ workspaceName, promoCode, fallbackCountry, overrideCountry }) => {
+                    async ({ workspaceName, promoCode, fallbackCountry, overrideCountry, seatQuantity }) => {
                         const currencyMap = {
                             'AE': 'AED', 'AL': 'ALL', 'AM': 'AMD', 'AU': 'AUD', 'AW': 'AWG', 'AZ': 'AZN',
                             'BA': 'BAM', 'BD': 'BDT', 'BG': 'BGN', 'BH': 'BHD', 'BM': 'BMD', 'BR': 'BRL',
@@ -189,7 +204,7 @@ class PaymentManager:
                                 team_plan_data: {
                                     workspace_name: workspaceName,
                                     price_interval: "month",
-                                    seat_quantity: 3
+                                    seat_quantity: seatQuantity
                                 },
                                 billing_details: { country, currency },
                                 cancel_url: `https://chatgpt.com/?promoCode=${encodeURIComponent(promoCode)}`,
@@ -202,7 +217,7 @@ class PaymentManager:
                                     team_plan_data: {
                                         workspace_name: workspaceName,
                                         price_interval: "month",
-                                        seat_quantity: 3
+                                        seat_quantity: seatQuantity
                                     },
                                     billing_details: { country: "US", currency: "USD" },
                                     cancel_url: `https://chatgpt.com/p/${encodeURIComponent(promoCode)}`,
@@ -216,7 +231,7 @@ class PaymentManager:
                             team_plan_data: {
                                 workspace_name: workspaceName,
                                 price_interval: "month",
-                                seat_quantity: 3
+                                seat_quantity: seatQuantity
                             },
                             billing_details: { country, currency },
                             cancel_url: "https://chatgpt.com/#pricing",
@@ -266,11 +281,13 @@ class PaymentManager:
                 "promoCode": current_promo,
                 "fallbackCountry": settings.card.billing_country or "US",
                 "overrideCountry": override_country,
+                "seatQuantity": self._seat_quantity(),
             }
 
             promo_label = f"优惠码 [{current_promo}]" if current_promo else "标准无优惠码"
             if len(candidates_promo) > 1:
-                logger.info(f"🏷️ [{p_idx + 1}/{len(candidates_promo)}] 正在尝试使用 {promo_label} 提取 3 席位 Team 长链...")
+                logger.info(f"🏷️ [{p_idx + 1}/{len(candidates_promo)}] 正在尝试使用 {promo_label} 提取 "
+                        f"{self._seat_quantity()} 席位 Team 长链...")
 
             # 1. 若配置了独立提链代理 (如锁定 CO/COP 等优惠汇率)，优先通过独立提链通道单次提取
             if checkout_proxy_raw and checkout_proxy_raw != common_proxy_raw:

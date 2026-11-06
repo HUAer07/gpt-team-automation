@@ -261,3 +261,19 @@ curl -s http://127.0.0.1:8899/api/children/audit/last      # 取上次结果，�
 流水线运行中会直接拒绝（400），避免抢浏览器与子号会话。
 
 自检：`python tests/selftest_child_audit.py`（5 种分类全覆盖，不联网）
+
+---
+
+## 提链席位数（可自选）
+
+Team 套餐按席位计价，提链时不再写死 3 席：
+
+- 控制台：母号配置里「**提链席位数 (seat_quantity)**」下拉，1/2/3/4/5/6/8/10/15/20，默认 3 席
+- 接口：`POST /api/config` 带 `{"seat_quantity": 5}`
+- 环境变量：`SEAT_QUANTITY=5`
+- 取值会被夹在 **1..20**：0/负数夹到 1，超 20 夹到 20，脏值回退 3
+
+生效位置：`/backend-api/payments/checkout` 的 `team_plan_data.seat_quantity`，
+三个候选载荷（含优惠码 / US 兜底 / 标准）都会带上该值。
+
+自检：`python tests/selftest_seat_quantity.py`
